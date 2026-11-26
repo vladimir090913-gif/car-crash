@@ -1,0 +1,54 @@
+name: Build CrashForge APK
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install SDK/NDK/CMake
+        run: |
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" \
+                     "ndk;26.1.10909125" "cmake;3.22.1"
+
+      - uses: gradle/actions/setup-gradle@v3
+        with: { gradle-version: '8.9' }
+
+      - name: Build APK
+        working-directory: android
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Rename
+        run: |
+          mkdir -p out
+          cp android/app/build/outputs/apk/release/*.apk out/CrashForge.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CrashForge-apk
+          path: out/CrashForge.apk
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/CrashForge.apk
+          name: CrashForge ${{ github.ref_name }}
+          body: |
+            APK для Android 7+ (arm64).
+            Скачай CrashForge.apk, разреши установку из неизвестных источников, открой файл.
