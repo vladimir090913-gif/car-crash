@@ -1,113 +1,71 @@
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-<meta charset="utf-8">
+<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>CrashForge — 3D разрушение машин</title>
-<style>
+<title>CrashForge - 3D разрушение машин</title><style>
 :root{--bg:#0b0e14;--card:#141926;--acc:#ff5a3c;--acc2:#3ba7ff;--txt:#e8ecf4}
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--txt);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-     line-height:1.6;overflow-x:hidden}
+body{background:var(--bg);color:var(--txt);font-family:system-ui,-apple-system,Roboto,sans-serif;line-height:1.6}
 .wrap{max-width:900px;margin:0 auto;padding:24px 18px 80px}
-header{text-align:center;padding:48px 0 32px}
+header{text-align:center;padding:44px 0 26px}
 h1{font-size:clamp(38px,9vw,72px);font-weight:900;letter-spacing:-2px;
-   background:linear-gradient(100deg,var(--acc),#ffb03c,var(--acc2));
-   -webkit-background-clip:text;background-clip:text;color:transparent}
+background:linear-gradient(100deg,var(--acc),#ffb03c,var(--acc2));
+-webkit-background-clip:text;background-clip:text;color:transparent}
 .sub{color:#9aa5bb;font-size:clamp(15px,4vw,19px);margin-top:8px}
-.btn{display:block;width:100%;max-width:420px;margin:26px auto 10px;padding:20px;
-     background:linear-gradient(135deg,var(--acc),#ff8a3c);color:#fff;border:0;border-radius:16px;
-     font-size:20px;font-weight:800;text-align:center;text-decoration:none;
-     box-shadow:0 10px 34px rgba(255,90,60,.35);transition:.15s}
+.btn{display:block;width:100%;max-width:420px;margin:24px auto 10px;padding:20px;
+background:linear-gradient(135deg,var(--acc),#ff8a3c);color:#fff;border-radius:16px;
+font-size:20px;font-weight:800;text-align:center;text-decoration:none;
+box-shadow:0 10px 34px rgba(255,90,60,.35)}
 .btn:active{transform:scale(.97)}
 .btn.alt{background:var(--card);border:1px solid #2a3348;box-shadow:none;font-size:16px;padding:15px}
 .status{text-align:center;color:#8b96ad;font-size:14px;min-height:22px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:34px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:32px 0}
 .card{background:var(--card);border:1px solid #222b3d;border-radius:14px;padding:18px}
 .card h3{font-size:16px;margin-bottom:6px;color:var(--acc2)}
 .card p{font-size:14px;color:#9aa5bb}
-h2{font-size:24px;margin:36px 0 14px;border-left:4px solid var(--acc);padding-left:12px}
-ol{padding-left:22px;color:#c3cbdb;font-size:15px}
-ol li{margin:9px 0}
+h2{font-size:23px;margin:34px 0 12px;border-left:4px solid var(--acc);padding-left:12px}
+ol{padding-left:22px;color:#c3cbdb;font-size:15px}ol li{margin:8px 0}
 code{background:#1d2434;padding:2px 7px;border-radius:6px;font-size:13px;color:#ffb03c}
-.qr{text-align:center;margin:22px 0}
-.qr img{background:#fff;padding:10px;border-radius:12px;width:180px;height:180px}
-footer{text-align:center;color:#5c6579;font-size:13px;margin-top:50px}
 .badge{display:inline-block;background:#1d2434;border:1px solid #2a3348;border-radius:20px;
-       padding:5px 13px;font-size:12px;color:#9aa5bb;margin:4px 3px}
-</style>
-</head>
-<body>
-<div class="wrap">
-<header>
-  <h1>CRASHFORGE</h1>
-  <div class="sub">Настоящая soft-body физика разрушения автомобилей · C++ · Android</div>
-  <div style="margin-top:14px">
-    <span class="badge">XPBD node-beam</span>
-    <span class="badge">Pacejka шины</span>
-    <span class="badge">60 FPS</span>
-    <span class="badge">Без рекламы</span>
-  </div>
-</header>
-
-<a id="dl" class="btn" href="#">⬇ СКАЧАТЬ APK</a>
-<div id="st" class="status">Проверяю последний релиз…</div>
-<a id="nightly" class="btn alt" href="#">Свежая сборка (без релиза)</a>
-
-<div class="qr"><img id="qr" alt="QR" src=""></div>
-
+padding:5px 13px;font-size:12px;color:#9aa5bb;margin:4px 3px}
+footer{text-align:center;color:#5c6579;font-size:13px;margin-top:46px}
+</style></head><body><div class="wrap">
+<header><h1>CRASHFORGE</h1>
+<div class="sub">Soft-body физика разрушения автомобилей - C++ - Android</div>
+<div style="margin-top:14px"><span class="badge">XPBD node-beam</span>
+<span class="badge">Pacejka шины</span><span class="badge">Без рекламы</span></div></header>
+<a id="dl" class="btn" href="#">СКАЧАТЬ APK</a>
+<div id="st" class="status">Проверяю последний релиз...</div>
+<a id="nl" class="btn alt" href="#">Свежая сборка из Actions</a>
 <div class="grid">
-  <div class="card"><h3>Кузов мнётся по-настоящему</h3><p>49 узлов и ~1000 балок. Пластическая деформация, разрыв связей, отваливающиеся колёса и панели.</p></div>
-  <div class="card"><h3>Честные шины</h3><p>Модель Pacejka: продольное скольжение, угол увода, эллипс трения. Юз, дрифт, следы на асфальте.</p></div>
-  <div class="card"><h3>5 режимов</h3><p>Песочница, краш-тест в стену, трамплин, дерби с ИИ и гидравлический пресс.</p></div>
-  <div class="card"><h3>Замедление времени</h3><p>Кинематографичная камера автоматически включается на сильном ударе.</p></div>
-  <div class="card"><h3>Тач-управление</h3><p>Мультитач: джойстик руля, педали газа/тормоза, ручник. Всё под большой палец.</p></div>
-  <div class="card"><h3>Ноль ассетов</h3><p>Вся графика и звук генерируются кодом. APK весит считанные мегабайты.</p></div>
+<div class="card"><h3>Кузов мнётся по-настоящему</h3><p>49 узлов и около 1000 балок. Пластическая деформация, разрыв связей, отрыв колёс и панелей.</p></div>
+<div class="card"><h3>Честные шины</h3><p>Модель Pacejka: продольное скольжение, угол увода, эллипс трения. Юз, дрифт, следы на асфальте.</p></div>
+<div class="card"><h3>5 режимов</h3><p>Песочница, краш-тест в стену, трамплин, дерби с ИИ, гидравлический пресс.</p></div>
+<div class="card"><h3>Слоумо</h3><p>Кинематографичная камера включается автоматически на сильном ударе.</p></div>
+<div class="card"><h3>Тач-управление</h3><p>Мультитач: джойстик руля, педали, ручник. Всё под большой палец.</p></div>
+<div class="card"><h3>Ноль ассетов</h3><p>Графика и звук генерируются кодом. APK весит считанные мегабайты.</p></div>
 </div>
-
-<h2>Как установить</h2>
-<ol>
-  <li>Нажми <b>СКАЧАТЬ APK</b> выше с телефона.</li>
-  <li>Открой скачанный файл <code>CrashForge.apk</code>.</li>
-  <li>Android спросит разрешение — <b>«Установка из неизвестных источников»</b> → Разреши для браузера/файлового менеджера.</li>
-  <li>Установи → Открой. Игра сразу в ландшафте.</li>
-  <li>Требуется Android 7.0+ и процессор arm64 (почти любой телефон после 2017).</li>
-</ol>
-
-<h2>Управление</h2>
-<ol>
-  <li><b>Слева</b> — круглый джойстик руля.</li>
-  <li><b>Справа</b> — GAS и BRK. Держи BRK на месте → задняя передача.</li>
-  <li><b>P-BRK</b> — ручник, блокирует задние колёса (дрифт).</li>
-  <li><b>MODE</b> — сменить режим, <b>CAR</b> — заспавнить ещё машину, <b>RESET</b> — починить.</li>
-  <li><b>SLOW</b> — слоумо, <b>CAM</b> — вид камеры. Свайп по свободной области — обзор.</li>
-</ol>
-
-<footer>CrashForge · открытый исходник на C++ · собирается автоматически в GitHub Actions</footer>
-</div>
-
+<h2>Установка</h2><ol>
+<li>Нажми СКАЧАТЬ APK выше с телефона.</li>
+<li>Открой файл <code>CrashForge.apk</code>.</li>
+<li>Разреши установку из неизвестных источников.</li>
+<li>Установи и открой. Нужен Android 7+ и arm64.</li></ol>
+<h2>Управление</h2><ol>
+<li>Слева - джойстик руля.</li>
+<li>Справа - GAS и BRK. Держи BRK на месте - задняя передача.</li>
+<li>P-BRK - ручник для дрифта.</li>
+<li>MODE - режим, CAR - ещё машина, RESET - починить.</li>
+<li>SLOW - слоумо, CAM - камера. Свайп по свободной зоне - обзор.</li></ol>
+<footer>CrashForge - открытый исходник на C++</footer></div>
 <script>
-const owner = location.hostname.split('.')[0];
-const repo  = location.pathname.split('/').filter(Boolean)[0] || 'CrashForge';
-const base  = `https://github.com/${owner}/${repo}`;
-const st = document.getElementById('st'), dl = document.getElementById('dl');
-document.getElementById('nightly').href =
-  `https://nightly.link/${owner}/${repo}/workflows/build/main/CrashForge-apk.zip`;
-document.getElementById('qr').src =
-  'https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=' + encodeURIComponent(location.href);
-
-fetch(`https://api.github.com/repos/${owner}/${repo}/releases/latest`)
- .then(r => r.ok ? r.json() : Promise.reject())
- .then(j => {
-   const a = (j.assets||[]).find(x => x.name.endsWith('.apk'));
-   if (!a) throw 0;
-   dl.href = a.browser_download_url;
-   st.textContent = `${j.tag_name} · ${(a.size/1048576).toFixed(1)} МБ · скачано ${a.download_count} раз`;
- })
- .catch(() => {
-   dl.href = base + '/releases';
-   st.textContent = 'Релиза ещё нет — открой Actions и скачай артефакт, или создай тег v1.0';
- });
-</script>
-</body>
-</html>
+const owner=location.hostname.split('.')[0];
+const repo=location.pathname.split('/').filter(Boolean)[0]||'CrashForge';
+const st=document.getElementById('st'),dl=document.getElementById('dl');
+document.getElementById('nl').href='https://nightly.link/'+owner+'/'+repo+'/workflows/build/main/CrashForge-apk.zip';
+fetch('https://api.github.com/repos/'+owner+'/'+repo+'/releases/latest')
+.then(r=>r.ok?r.json():Promise.reject()).then(j=>{
+const a=(j.assets||[]).find(x=>x.name.endsWith('.apk'));
+if(!a)throw 0;
+dl.href=a.browser_download_url;
+st.textContent=j.tag_name+' - '+(a.size/1048576).toFixed(1)+' МБ';
+}).catch(()=>{dl.href='https://github.com/'+owner+'/'+repo+'/releases';
+st.textContent='Релиз ещё готовится - обнови страницу через минуту';});
+</script></body></html>
