@@ -1,54 +1,1719 @@
-name: Build CrashForge APK
+name: CrashForge Bootstrap and Build
 
 on:
   push:
     branches: [main]
-    tags: ['v*']
   workflow_dispatch:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 jobs:
-  android:
+  build:
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.dep.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
+      - name: Generate project files
+        run: |
+          set -e
+          mkdir -p src android/app/src/main docs
+          cat > .gitignore << 'EOF_GI'
+          build/
+          android/.gradle/
+          android/app/build/
+          android/build/
+          out/
+          EOF_GI
+
+          cat > CMakeLists.txt << 'EOF_CMAKE'
+          cmake_minimum_required(VERSION 3.22)
+          project(CrashForge LANGUAGES C CXX)
+          set(CMAKE_CXX_STANDARD 20)
+          set(CMAKE_CXX_STANDARD_REQUIRED ON)
+          if(NOT CMAKE_BUILD_TYPE)
+            set(CMAKE_BUILD_TYPE Release)
+          endif()
+          include(FetchContent)
+          if(ANDROID)
+            set(PLATFORM "Android" CACHE STRING "" FORCE)
+          else()
+            set(PLATFORM "Desktop" CACHE STRING "" FORCE)
+          endif()
+          set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+          set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
+          set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+          FetchContent_Declare(raylib
+            GIT_REPOSITORY https://github.com/raysan5/raylib.git
+            GIT_TAG 5.5
+            GIT_SHALLOW TRUE)
+          FetchContent_MakeAvailable(raylib)
+          file(GLOB SRC CONFIGURE_DEPENDS src/*.cpp)
+          if(ANDROID)
+            add_library(crashforge SHARED ${SRC})
+          else()
+            add_executable(crashforge ${SRC})
+          endif()
+          target_include_directories(crashforge PRIVATE src)
+          target_link_libraries(crashforge PRIVATE raylib)
+          if(ANDROID)
+            target_link_libraries(crashforge PRIVATE log android EGL GLESv2 m)
+            target_compile_definitions(crashforge PRIVATE PLATFORM_ANDROID)
+          else()
+            target_compile_definitions(crashforge PRIVATE PLATFORM_DESKTOP)
+          endif()
+          target_compile_options(crashforge PRIVATE -O3 -ffast-math)
+          EOF_CMAKE
+
+          cat > android/settings.gradle << 'EOF_SET'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "CrashForge"
+          include ':app'
+          EOF_SET
+
+          cat > android/build.gradle << 'EOF_BG'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF_BG
+
+          cat > android/gradle.properties << 'EOF_GP'
+          org.gradle.jvmargs=-Xmx3g
+          android.useAndroidX=false
+          org.gradle.parallel=true
+          EOF_GP
+
+          cat > android/app/build.gradle << 'EOF_AG'
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'com.crashforge.game'
+              compileSdk 34
+              ndkVersion '26.1.10909125'
+              defaultConfig {
+                  applicationId "com.crashforge.game"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+                  ndk { abiFilters 'arm64-v8a' }
+                  externalNativeBuild {
+                      cmake {
+                          arguments '-DANDROID_STL=c++_static', '-DCMAKE_BUILD_TYPE=Release'
+                          cppFlags '-std=c++20', '-O3', '-ffast-math'
+                      }
+                  }
+              }
+              externalNativeBuild {
+                  cmake {
+                      path '../../CMakeLists.txt'
+                      version '3.22.1'
+                  }
+              }
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      signingConfig signingConfigs.debug
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              packagingOptions { jniLibs { useLegacyPackaging true } }
+          }
+          EOF_AG
+
+          cat > android/app/src/main/AndroidManifest.xml << 'EOF_MF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature android:glEsVersion="0x00020000" android:required="true"/>
+              <application android:label="CrashForge"
+                           android:hasCode="false"
+                           android:allowBackup="true"
+                           android:extractNativeLibs="true">
+                  <activity android:name="android.app.NativeActivity"
+                            android:exported="true"
+                            android:screenOrientation="sensorLandscape"
+                            android:keepScreenOn="true"
+                            android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|uiMode|density"
+                            android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+                      <meta-data android:name="android.app.lib_name" android:value="crashforge"/>
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF_MF
+
+          cat > src/main.cpp << 'EOF_CPP'
+          // CrashForge - soft-body vehicle destruction. Single-file build.
+          #include "raylib.h"
+          #include "rlgl.h"
+          #include <cmath>
+          #include <cstdlib>
+          #include <cstdio>
+          #include <algorithm>
+          #include <vector>
+          #include <unordered_map>
+          #include <memory>
+
+          // ============================ MATH ============================
+          struct V3 {
+              float x=0,y=0,z=0;
+              V3(){} V3(float a,float b,float c):x(a),y(b),z(c){}
+              V3 operator+(const V3&o)const{return {x+o.x,y+o.y,z+o.z};}
+              V3 operator-(const V3&o)const{return {x-o.x,y-o.y,z-o.z};}
+              V3 operator*(float s)const{return {x*s,y*s,z*s};}
+              V3 operator-()const{return {-x,-y,-z};}
+              V3& operator+=(const V3&o){x+=o.x;y+=o.y;z+=o.z;return *this;}
+              V3& operator-=(const V3&o){x-=o.x;y-=o.y;z-=o.z;return *this;}
+              V3& operator*=(float s){x*=s;y*=s;z*=s;return *this;}
+          };
+          static inline float dot(V3 a,V3 b){return a.x*b.x+a.y*b.y+a.z*b.z;}
+          static inline V3 cross(V3 a,V3 b){
+              return {a.y*b.z-a.z*b.y, a.z*b.x-a.x*b.z, a.x*b.y-a.y*b.x};
+          }
+          static inline float len2(V3 a){return dot(a,a);}
+          static inline float len(V3 a){return std::sqrt(dot(a,a));}
+          static inline V3 norm(V3 a){float l=len(a);return l>1e-9f?a*(1.f/l):V3(0,1,0);}
+          static inline V3 lerp(V3 a,V3 b,float t){return a+(b-a)*t;}
+          static inline float clampf(float v,float a,float b){return v<a?a:(v>b?b:v);}
+          static inline float signf(float v){return v<0.f?-1.f:1.f;}
+          static inline float frand(float a,float b){return a+(b-a)*(rand()/(float)RAND_MAX);}
+          static inline V3 randDir(){return norm(V3(frand(-1,1),frand(-1,1),frand(-1,1)));}
+          static inline Vector3 rv(V3 v){return Vector3{v.x,v.y,v.z};}
+          static inline V3 vv(Vector3 v){return V3(v.x,v.y,v.z);}
+          static inline float vget(V3 v,int i){return i==0?v.x:(i==1?v.y:v.z);}
+          static inline float smoothTo(float c,float t,float r,float dt){
+              return c+(t-c)*(1.f-std::exp(-r*dt));
+          }
+
+          // ============================ SOFT BODY ============================
+          namespace sb {
+
+          struct OBB {
+              V3 c{0,0,0};
+              V3 ax[3]{{1,0,0},{0,1,0},{0,0,1}};
+              V3 h{1,1,1};
+              float fric=0.6f, rest=0.05f;
+              V3 vel{0,0,0};
+              Color col{120,120,130,255};
+              bool enabled=true;
+          };
+
+          struct World {
+              std::vector<OBB> boxes;
+              float gravity=-16.0f;
+              float groundFric=0.8f;
+              void support(V3 p,float& hy,V3& nrm) const {
+                  hy=0.f; nrm=V3(0,1,0);
+                  for (const auto& b : boxes) {
+                      if (!b.enabled) continue;
+                      V3 o=p+V3(0,60,0);
+                      V3 d=o-b.c;
+                      V3 lo{dot(d,b.ax[0]),dot(d,b.ax[1]),dot(d,b.ax[2])};
+                      V3 ld{-b.ax[0].y,-b.ax[1].y,-b.ax[2].y};
+                      float tmin=0.f,tmax=120.f; int axis=-1; float sgn=1.f;
+                      bool ok=true;
+                      for (int i=0;i<3;i++){
+                          float l=vget(lo,i), dd=vget(ld,i), hh=vget(b.h,i);
+                          if (std::fabs(dd)<1e-6f){ if(std::fabs(l)>hh){ok=false;break;} continue; }
+                          float t1=(-hh-l)/dd, t2=(hh-l)/dd, s=-1.f;
+                          if (t1>t2){ std::swap(t1,t2); s=1.f; }
+                          if (t1>tmin){ tmin=t1; axis=i; sgn=s; }
+                          tmax=std::min(tmax,t2);
+                          if (tmin>tmax){ ok=false; break; }
+                      }
+                      if (ok && axis>=0 && tmin>0.f){
+                          float y=o.y-tmin;
+                          if (y>hy){ hy=y; nrm=b.ax[axis]*sgn; }
+                      }
+                  }
+              }
+          };
+
+          struct Node {
+              V3 p,pp,v,p0,force;
+              float w=1.f, r=0.11f;
+              float fric=0.5f, rest=0.02f, damage=0.f;
+              bool contact=false, isWheel=false;
+              V3 cn{0,1,0}, surfVel{0,0,0};
+              float impact=0.f;
+          };
+
+          enum BType : unsigned char { STRUCT,SHEAR,BEND,SUSP,SPRING };
+
+          struct Beam {
+              int a=0,b=0;
+              float L0=1,Lrest=1;
+              float comp0=1e-7f,comp=1e-7f,damp=250.f;
+              float yield=0.022f,brk=0.42f,plastic=0.55f,dmgRate=0.22f;
+              float damage=0.f;
+              bool broken=false;
+              unsigned char type=STRUCT;
+          };
+
+          struct BreakEvent { V3 pos; float power; int type; };
+
+          struct Body {
+              std::vector<Node> nodes;
+              std::vector<Beam> beams;
+              V3 bmin,bmax;
+              bool isVehicle=false;
+              int brokenCount=0;
+              float deformEnergy=0.f;
+              void aabb(){
+                  bmin=V3(1e9f,1e9f,1e9f); bmax=V3(-1e9f,-1e9f,-1e9f);
+                  for(auto&n:nodes){
+                      bmin.x=std::min(bmin.x,n.p.x); bmax.x=std::max(bmax.x,n.p.x);
+                      bmin.y=std::min(bmin.y,n.p.y); bmax.y=std::max(bmax.y,n.p.y);
+                      bmin.z=std::min(bmin.z,n.p.z); bmax.z=std::max(bmax.z,n.p.z);
+                  }
+                  bmin-=V3(0.4f,0.4f,0.4f); bmax+=V3(0.4f,0.4f,0.4f);
+              }
+              V3 center() const {
+                  V3 c{}; float m=0;
+                  for(auto&n:nodes){ float w=n.w>0?1.f/n.w:0; c+=n.p*w; m+=w; }
+                  return m>0?c*(1.f/m):c;
+              }
+              V3 velocity() const {
+                  V3 c{}; float m=0;
+                  for(auto&n:nodes){ float w=n.w>0?1.f/n.w:0; c+=n.v*w; m+=w; }
+                  return m>0?c*(1.f/m):c;
+              }
+              void addBeam(int a,int b,float k,float d,unsigned char t,
+                           float yld,float bk,float strength=1.f){
+                  Beam bm; bm.a=a; bm.b=b;
+                  bm.Lrest=bm.L0=len(nodes[b].p-nodes[a].p);
+                  bm.comp0=bm.comp=1.f/(k*strength);
+                  bm.damp=d; bm.type=t; bm.yield=yld; bm.brk=bk;
+                  beams.push_back(bm);
+              }
+          };
+
+          static inline bool collideOBB(const OBB& b,V3& p,float r,V3& nOut,float& depth){
+              V3 d=p-b.c;
+              V3 l{dot(d,b.ax[0]),dot(d,b.ax[1]),dot(d,b.ax[2])};
+              bool inside=std::fabs(l.x)<b.h.x && std::fabs(l.y)<b.h.y && std::fabs(l.z)<b.h.z;
+              V3 nl; float dep;
+              if (inside){
+                  float px=b.h.x-std::fabs(l.x), py=b.h.y-std::fabs(l.y), pz=b.h.z-std::fabs(l.z);
+                  if (px<=py&&px<=pz){ nl=V3(signf(l.x),0,0); dep=px+r; }
+                  else if (py<=pz){ nl=V3(0,signf(l.y),0); dep=py+r; }
+                  else { nl=V3(0,0,signf(l.z)); dep=pz+r; }
+              } else {
+                  V3 cl{clampf(l.x,-b.h.x,b.h.x),clampf(l.y,-b.h.y,b.h.y),clampf(l.z,-b.h.z,b.h.z)};
+                  V3 dd=l-cl; float L=len(dd);
+                  if (L>=r) return false;
+                  nl=dd*(1.f/std::max(L,1e-6f)); dep=r-L;
+              }
+              nOut=b.ax[0]*nl.x+b.ax[1]*nl.y+b.ax[2]*nl.z;
+              depth=dep; p+=nOut*dep;
+              return true;
+          }
+
+          static void step(std::vector<Body*>& bodies,World& W,float h,
+                           std::vector<BreakEvent>& events){
+              const float invH=1.f/h;
+              for (auto* B : bodies){
+                  for (auto& n : B->nodes){
+                      if (n.w<=0) continue;
+                      n.v.y+=W.gravity*h;
+                      n.v+=n.force*n.w*h;
+                      n.force=V3{};
+                      n.v*=1.f/(1.f+0.02f*h);
+                      n.pp=n.p; n.p+=n.v*h;
+                      n.contact=false; n.impact=0.f;
+                  }
+              }
+              for (auto* B : bodies){
+                  for (auto& bm : B->beams){
+                      if (bm.broken) continue;
+                      Node& A=B->nodes[bm.a]; Node& Bn=B->nodes[bm.b];
+                      float ws=A.w+Bn.w; if (ws<=0) continue;
+                      V3 d=Bn.p-A.p; float L=len(d); if (L<1e-7f) continue;
+                      V3 n=d*(1.f/L);
+                      float strain=(L-bm.L0)/bm.Lrest;
+                      float a=std::fabs(strain);
+                      if (a>bm.yield){
+                          float over=a-bm.yield;
+                          float flow=clampf(over*bm.plastic,0.f,0.25f);
+                          bm.L0=clampf(bm.L0+(L-bm.L0)*flow, bm.Lrest*0.30f, bm.Lrest*2.20f);
+                          bm.damage+=over*bm.dmgRate;
+                          bm.comp=bm.comp0*(1.f+3.f*std::min(bm.damage,1.f));
+                          B->deformEnergy+=over*bm.Lrest;
+                      }
+                      if (a>bm.brk || bm.damage>=1.f){
+                          bm.broken=true; B->brokenCount++;
+                          events.push_back({(A.p+Bn.p)*0.5f,a,(int)bm.type});
+                          continue;
+                      }
+                      float C=L-bm.L0;
+                      float at=bm.comp*invH*invH;
+                      float dl=-C/(ws+at);
+                      A.p-=n*(dl*A.w); Bn.p+=n*(dl*Bn.w);
+                  }
+              }
+              for (size_t i=0;i<bodies.size();i++){
+                  bodies[i]->aabb();
+                  for (size_t j=i+1;j<bodies.size();j++){
+                      Body* A=bodies[i]; Body* Bb=bodies[j];
+                      if (A->bmax.x<Bb->bmin.x||A->bmin.x>Bb->bmax.x) continue;
+                      if (A->bmax.y<Bb->bmin.y||A->bmin.y>Bb->bmax.y) continue;
+                      if (A->bmax.z<Bb->bmin.z||A->bmin.z>Bb->bmax.z) continue;
+                      for (auto& na : A->nodes) for (auto& nb : Bb->nodes){
+                          float rr=na.r+nb.r;
+                          V3 d=nb.p-na.p; float L2=len2(d);
+                          if (L2>=rr*rr||L2<1e-9f) continue;
+                          float L=std::sqrt(L2); V3 n=d*(1.f/L);
+                          float ws=na.w+nb.w; if (ws<=0) continue;
+                          float dep=rr-L;
+                          na.p-=n*(dep*na.w/ws); nb.p+=n*(dep*nb.w/ws);
+                          float imp=dep*invH;
+                          na.impact=std::max(na.impact,imp);
+                          nb.impact=std::max(nb.impact,imp);
+                          na.contact=nb.contact=true;
+                          na.cn=n*-1.f; nb.cn=n;
+                          na.fric=nb.fric=0.5f;
+                      }
+                  }
+              }
+              for (auto* B : bodies) for (auto& n : B->nodes){
+                  if (n.w<=0) continue;
+                  if (n.p.y-n.r<0.f){
+                      n.p.y=n.r; n.contact=true; n.cn=V3(0,1,0);
+                      n.fric=n.isWheel?0.02f:W.groundFric;
+                      n.rest=0.02f; n.surfVel=V3{};
+                  }
+                  for (auto& b : W.boxes){
+                      if (!b.enabled) continue;
+                      V3 nn; float dep;
+                      if (collideOBB(b,n.p,n.r,nn,dep)){
+                          n.contact=true; n.cn=nn;
+                          n.fric=n.isWheel?0.02f:b.fric;
+                          n.rest=b.rest; n.surfVel=b.vel;
+                          n.impact=std::max(n.impact,dep*invH);
+                      }
+                  }
+              }
+              for (auto* B : bodies) for (auto& n : B->nodes)
+                  if (n.w>0) n.v=(n.p-n.pp)*invH;
+              for (auto* B : bodies){
+                  for (auto& bm : B->beams){
+                      if (bm.broken) continue;
+                      Node& A=B->nodes[bm.a]; Node& Bn=B->nodes[bm.b];
+                      float ws=A.w+Bn.w; if (ws<=0) continue;
+                      V3 d=Bn.p-A.p; float L=len(d); if (L<1e-7f) continue;
+                      V3 n=d*(1.f/L);
+                      float c=clampf(bm.damp*h*ws,0.f,1.f);
+                      float vn=dot(Bn.v-A.v,n);
+                      V3 corr=n*(vn*c/ws);
+                      A.v+=corr*A.w; Bn.v-=corr*Bn.w;
+                  }
+                  for (auto& n : B->nodes){
+                      if (!n.contact||n.w<=0) continue;
+                      V3 rel=n.v-n.surfVel;
+                      float vn=dot(rel,n.cn);
+                      if (vn<0){ n.impact=std::max(n.impact,-vn); rel-=n.cn*(vn*(1.f+n.rest)); }
+                      V3 vt=rel-n.cn*dot(rel,n.cn);
+                      rel-=vt*clampf(n.fric*45.f*h,0.f,1.f);
+                      n.v=rel+n.surfVel;
+                  }
+                  for (auto& n : B->nodes) n.damage=0.f;
+                  std::vector<int> cnt(B->nodes.size(),0);
+                  for (auto& bm : B->beams){
+                      float d=bm.broken?1.f:std::min(bm.damage,1.f);
+                      B->nodes[bm.a].damage+=d; cnt[bm.a]++;
+                      B->nodes[bm.b].damage+=d; cnt[bm.b]++;
+                  }
+                  for (size_t i=0;i<B->nodes.size();i++)
+                      if (cnt[i]) B->nodes[i].damage/=cnt[i];
+              }
+          }
+          } // namespace sb
+          using namespace sb;
+
+          // ============================ VEHICLE ============================
+          struct CarSpec {
+              float mass=1250.f;
+              float wheelR=0.34f, wheelMass=26.f;
+              float springK=44000.f, springD=4200.f;
+              float tireMu=1.18f;
+              float peakTorque=360.f, redline=7200.f, idle=900.f;
+              float gears[6]={3.55f,2.28f,1.62f,1.24f,0.98f,0.79f};
+              float diff=3.42f;
+              bool awd=false;
+              float strength=1.f;
+              Color paint{210,60,50,255};
+          };
+
+          struct Wheel {
+              int node=-1, spring=-1;
+              std::vector<int> links;
+              float omega=0.f, steer=0.f, inertia=1.2f;
+              float slipRatio=0.f, slipAngle=0.f, load=0.f;
+              bool driven=false, front=false, attached=true, onGround=false;
+              V3 contactPoint{};
+          };
+
+          struct Vehicle {
+              Body body;
+              CarSpec spec;
+              Wheel wheels[4];
+              int nFront=0,nRear=0,nTop=0,nBottom=0;
+              V3 fwd{0,0,1},up{0,1,0},right{1,0,0},pos{};
+              float speed=0.f,rpm=900.f,throttle=0.f,brakeIn=0.f,steerIn=0.f;
+              int gear=1;
+              float shiftTimer=0.f,engineDamage=0.f,totalDamage=0.f;
+              bool handbrake=false,engineOn=true;
+              float maxSteer=0.55f;
+
+              void build(const CarSpec& s,V3 origin,float yaw){
+                  spec=s; body.isVehicle=true;
+                  const int NS=6;
+                  float zs[NS]={-2.20f,-1.42f,-0.52f,0.42f,1.38f,2.20f};
+                  float xs[3]={-0.90f,0.f,0.90f};
+                  float yF=0.34f,yB=0.88f,yR=1.42f;
+                  float beltW[NS]={0.84f,0.98f,1.0f,1.0f,0.96f,0.80f};
+                  float roofP[4]={0.f,0.94f,1.0f,0.90f};
+                  auto add=[&](V3 p,float m,bool wheel=false,float rad=0.11f){
+                      Node n; n.p0=p; n.p=p; n.pp=p;
+                      n.w=1.f/m; n.r=rad; n.isWheel=wheel; n.fric=0.55f;
+                      body.nodes.push_back(n);
+                      return (int)body.nodes.size()-1;
+                  };
+                  int F[NS][3],B[NS][3],R[4][3];
+                  for (int i=0;i<NS;i++) for (int k=0;k<3;k++){
+                      float wgt=(i>=1&&i<=4)?1.5f:1.0f;
+                      F[i][k]=add(V3(xs[k],yF,zs[i]),wgt);
+                      B[i][k]=add(V3(xs[k]*beltW[i],yB,zs[i]),0.75f);
+                  }
+                  for (int i=1;i<=3;i++) for (int k=0;k<3;k++)
+                      R[i][k]=add(V3(xs[k]*0.80f,yR*roofP[i],zs[i]),0.42f);
+                  float target=s.mass-4*s.wheelMass,cur=0;
+                  for (auto& n : body.nodes) cur+=1.f/n.w;
+                  float kk=target/cur;
+                  for (auto& n : body.nodes) n.w/=kk;
+                  int N=(int)body.nodes.size();
+                  for (int a=0;a<N;a++) for (int b=a+1;b<N;b++){
+                      float L=len(body.nodes[b].p-body.nodes[a].p);
+                      float stiff,yld,bk; unsigned char t;
+                      if (L<1.30f){ stiff=6.0e6f; yld=0.020f; bk=0.40f; t=STRUCT; }
+                      else if (L<2.30f){ stiff=3.2e6f; yld=0.024f; bk=0.46f; t=SHEAR; }
+                      else { stiff=9.0e5f; yld=0.030f; bk=0.60f; t=BEND; }
+                      float zm=(body.nodes[a].p0.z+body.nodes[b].p0.z)*0.5f;
+                      float zone=(zm>1.2f||zm<-1.3f)?0.55f:((zm>-1.5f&&zm<0.6f)?1.75f:1.0f);
+                      body.addBeam(a,b,stiff,260.f,t,yld,bk,zone*s.strength);
+                  }
+                  float axZ[2]={-1.42f,1.38f};
+                  int wi=0;
+                  for (int f=0;f<2;f++) for (int side=0;side<2;side++){
+                      float sx=side?1.f:-1.f;
+                      V3 wp(sx*0.88f,s.wheelR,axZ[f]);
+                      int idx=add(wp,s.wheelMass,true,0.20f);
+                      Wheel& w=wheels[wi];
+                      w.node=idx; w.front=(f==1); w.driven=s.awd||(f==0);
+                      for (int a=0;a<N;a++){
+                          V3 d=body.nodes[a].p0-wp;
+                          if (std::fabs(d.y)<0.10f && std::sqrt(d.x*d.x+d.z*d.z)<1.45f){
+                              body.addBeam(idx,a,9.0e6f,900.f,SUSP,0.05f,0.55f,s.strength);
+                              w.links.push_back((int)body.beams.size()-1);
+                          }
+                      }
+                      int st=(f==1)?4:1;
+                      int top=B[st][side?2:0];
+                      body.addBeam(idx,top,s.springK,s.springD,SPRING,0.40f,1.10f,1.f);
+                      w.spring=(int)body.beams.size()-1;
+                      wi++;
+                  }
+                  nFront=F[5][1]; nRear=F[0][1]; nTop=R[2][1]; nBottom=F[2][1];
+                  float c=std::cos(yaw),sn=std::sin(yaw);
+                  for (auto& n : body.nodes){
+                      V3 p=n.p0;
+                      V3 r(p.x*c+p.z*sn,p.y,-p.x*sn+p.z*c);
+                      n.p0=r; n.p=n.pp=r+origin;
+                  }
+                  for (auto& bm : body.beams)
+                      bm.Lrest=bm.L0=len(body.nodes[bm.b].p-body.nodes[bm.a].p);
+                  updateFrame();
+              }
+
+              void updateFrame(){
+                  auto& N=body.nodes;
+                  fwd=norm(N[nFront].p-N[nRear].p);
+                  V3 u0=norm(N[nTop].p-N[nBottom].p);
+                  right=norm(cross(u0,fwd));
+                  up=norm(cross(fwd,right));
+                  pos=body.center();
+                  speed=dot(body.velocity(),fwd);
+              }
+              static float magic(float x,float B,float C,float E){
+                  float bx=B*x;
+                  return std::sin(C*std::atan(bx-E*(bx-std::atan(bx))));
+              }
+              float torqueCurve(float r) const {
+                  float t=clampf((r-800.f)/6200.f,0.f,1.2f);
+                  return spec.peakTorque*(0.45f+0.85f*t-0.42f*t*t);
+              }
+              void control(float h,const World& W){
+                  updateFrame();
+                  float absSpd=std::fabs(speed);
+                  float ms=maxSteer*(0.28f+0.72f/(1.f+absSpd*0.09f));
+                  float tgt=steerIn*ms, rate=5.5f*h;
+                  for (int i=0;i<4;i++) if (wheels[i].front)
+                      wheels[i].steer+=clampf(tgt-wheels[i].steer,-rate,rate);
+                  shiftTimer-=h;
+                  int dc=0; float ws=0;
+                  for (auto& w : wheels) if (w.driven&&w.attached){ ws+=std::fabs(w.omega); dc++; }
+                  float wavg=dc?ws/dc:0;
+                  float gr=(gear==0)?3.4f:spec.gears[gear-1];
+                  rpm=clampf(wavg*gr*spec.diff*9.5493f,spec.idle,spec.redline);
+                  if (shiftTimer<=0 && gear>0){
+                      if (rpm>spec.redline*0.90f && gear<6){ gear++; shiftTimer=0.35f; }
+                      else if (rpm<spec.redline*0.33f && gear>1){ gear--; shiftTimer=0.30f; }
+                  }
+                  if (brakeIn>0.2f && speed<1.0f) gear=0;
+                  else if (gear==0 && throttle>0.1f && speed>-0.5f) gear=1;
+                  float thr=(gear==0)?brakeIn:throttle;
+                  float brk=(gear==0)?throttle:brakeIn;
+                  float health=engineOn?(1.f-clampf(engineDamage,0.f,1.f)*0.9f):0.f;
+                  float clutch=clampf((rpm-spec.idle*0.6f)/1200.f,0.25f,1.f);
+                  float engT=torqueCurve(rpm)*thr*health*clutch;
+                  if (rpm>=spec.redline*0.99f) engT*=0.15f;
+                  float driveT=engT*gr*spec.diff*0.90f/std::max(dc,1);
+                  if (gear==0) driveT=-driveT;
+                  for (int i=0;i<4;i++){
+                      Wheel& w=wheels[i];
+                      Node& n=body.nodes[w.node];
+                      if (w.attached){
+                          int alive=0;
+                          for (int bi : w.links) if (!body.beams[bi].broken) alive++;
+                          if (alive==0 && body.beams[w.spring].broken){
+                              w.attached=false; n.r=spec.wheelR; n.fric=0.9f;
+                          }
+                      }
+                      if (!w.attached){ w.omega*=0.995f; w.onGround=false; continue; }
+                      V3 f=norm(fwd*std::cos(w.steer)+right*std::sin(w.steer));
+                      V3 sd=norm(cross(up,f));
+                      float hy; V3 gn;
+                      W.support(n.p,hy,gn);
+                      float pen=spec.wheelR-(n.p.y-hy);
+                      w.onGround=(pen>0 && gn.y>0.3f);
+                      w.contactPoint=V3(n.p.x,hy,n.p.z);
+                      if (w.onGround){
+                          float penV=-dot(n.v,gn);
+                          float Fz=std::max(0.f,pen*190000.f+penV*5200.f);
+                          Fz=std::min(Fz,45000.f);
+                          w.load=Fz;
+                          n.force+=gn*Fz;
+                          float vLong=dot(n.v,f), vLat=dot(n.v,sd);
+                          float den=std::max(std::fabs(vLong),2.0f);
+                          w.slipRatio=(w.omega*spec.wheelR-vLong)/den;
+                          w.slipAngle=std::atan2(vLat,std::max(std::fabs(vLong),1.0f));
+                          float mu=spec.tireMu;
+                          float Fx=Fz*mu*magic(w.slipRatio,10.f,1.9f,0.97f);
+                          float Fy=-Fz*mu*magic(w.slipAngle,8.f,1.35f,-1.0f);
+                          float lim=mu*Fz+1.f;
+                          float comb=std::sqrt((Fx/lim)*(Fx/lim)+(Fy/lim)*(Fy/lim));
+                          if (comb>1.f){ Fx/=comb; Fy/=comb; }
+                          n.force+=f*Fx+sd*Fy;
+                          float bt=brk*2600.f+((handbrake&&!w.front)?5200.f:0.f);
+                          float T=(w.driven?driveT:0.f)-Fx*spec.wheelR;
+                          w.omega+=T/w.inertia*h;
+                          float dw=bt/w.inertia*h;
+                          if (std::fabs(w.omega)<=dw) w.omega=0.f;
+                          else w.omega-=signf(w.omega)*dw;
+                      } else {
+                          w.load=0; w.slipRatio=0; w.slipAngle=0;
+                          float T=(w.driven?driveT:0.f)-brk*2600.f*signf(w.omega);
+                          w.omega+=T/w.inertia*h;
+                          w.omega*=1.f/(1.f+0.4f*h);
+                      }
+                      w.omega=clampf(w.omega,-400.f,400.f);
+                  }
+                  float dmg=0,front=0; int fc=0;
+                  for (auto& bm : body.beams){
+                      float d=bm.broken?1.f:std::min(bm.damage,1.f);
+                      dmg+=d;
+                      float zm=(body.nodes[bm.a].p0.z+body.nodes[bm.b].p0.z)*0.5f;
+                      if (zm>1.0f){ front+=d; fc++; }
+                  }
+                  totalDamage=dmg/std::max((size_t)1,body.beams.size());
+                  engineDamage=fc?front/fc:0;
+                  if (engineDamage>0.92f) engineOn=false;
+              }
+              void reset(V3 origin,float yaw){
+                  CarSpec s=spec;
+                  body=Body{};
+                  for (int i=0;i<4;i++) wheels[i]=Wheel{};
+                  gear=1; engineOn=true; engineDamage=0; totalDamage=0;
+                  build(s,origin,yaw);
+              }
+          };
+
+          // ============================ FLEX MESH ============================
+          struct FVert { int n[3]; V3 local,rest,pos,nrm; Color base; };
+          struct FTri { int v[3]; float e[3]; bool dead=false; bool glass=false; };
+          struct Panel { int a,b,c,d; Color col; bool glass=false; int seg=2; };
+
+          struct FlexMesh {
+              std::vector<FVert> verts;
+              std::vector<FTri> tris;
+              std::vector<unsigned short> idx;
+              std::vector<float> vbuf,nbuf;
+              std::vector<unsigned char> cbuf;
+              Mesh mesh{};
+              Material mat{};
+              bool uploaded=false;
+
+              static void frame(V3 p0,V3 p1,V3 p2,V3& X,V3& Y,V3& Z){
+                  X=norm(p1-p0); Z=norm(cross(X,p2-p0)); Y=cross(Z,X);
+              }
+              int addVert(V3 rest,Color c,const std::vector<Node>& nodes){
+                  int best[3]={0,0,0}; float bd[3]={1e9f,1e9f,1e9f};
+                  for (size_t i=0;i<nodes.size();i++){
+                      if (nodes[i].isWheel) continue;
+                      float d=len2(nodes[i].p0-rest);
+                      for (int k=0;k<3;k++) if (d<bd[k]){
+                          for (int m=2;m>k;m--){ bd[m]=bd[m-1]; best[m]=best[m-1]; }
+                          bd[k]=d; best[k]=(int)i; break;
+                      }
+                  }
+                  V3 X,Y,Z;
+                  frame(nodes[best[0]].p0,nodes[best[1]].p0,nodes[best[2]].p0,X,Y,Z);
+                  for (int t=0;t<(int)nodes.size() && len(cross(X,Z))<0.1f;t++){
+                      best[2]=t;
+                      frame(nodes[best[0]].p0,nodes[best[1]].p0,nodes[best[2]].p0,X,Y,Z);
+                  }
+                  V3 d=rest-nodes[best[0]].p0;
+                  FVert v; v.n[0]=best[0]; v.n[1]=best[1]; v.n[2]=best[2];
+                  v.local=V3(dot(d,X),dot(d,Y),dot(d,Z));
+                  v.rest=rest; v.base=c; v.pos=rest; v.nrm=V3(0,1,0);
+                  verts.push_back(v);
+                  return (int)verts.size()-1;
+              }
+              void rebuildIndex(){
+                  idx.clear();
+                  for (auto& t : tris){
+                      if (t.dead){ idx.push_back(0); idx.push_back(0); idx.push_back(0); }
+                      else for (int k=0;k<3;k++) idx.push_back((unsigned short)t.v[k]);
+                  }
+              }
+              void build(const std::vector<Node>& nodes,const std::vector<Panel>& panels){
+                  verts.clear(); tris.clear(); idx.clear();
+                  std::unordered_map<long long,int> cache;
+                  auto key=[](V3 p){ return (long long)(p.x*150)*4000000LL
+                                          +(long long)(p.y*150)*2000LL+(long long)(p.z*150); };
+                  auto getV=[&](V3 p,Color c)->int{
+                      auto it=cache.find(key(p));
+                      if (it!=cache.end()) return it->second;
+                      int id=addVert(p,c,nodes);
+                      cache[key(p)]=id; return id;
+                  };
+                  for (auto& pn : panels){
+                      V3 A=nodes[pn.a].p0,B=nodes[pn.b].p0,C=nodes[pn.c].p0,D=nodes[pn.d].p0;
+                      int s=pn.seg;
+                      std::vector<int> g((s+1)*(s+1));
+                      for (int j=0;j<=s;j++) for (int i=0;i<=s;i++){
+                          float u=i/(float)s,v=j/(float)s;
+                          V3 p=lerp(lerp(A,B,u),lerp(D,C,u),v);
+                          g[j*(s+1)+i]=getV(p,pn.col);
+                      }
+                      for (int j=0;j<s;j++) for (int i=0;i<s;i++){
+                          int a=g[j*(s+1)+i],b=g[j*(s+1)+i+1],
+                              c=g[(j+1)*(s+1)+i+1],d=g[(j+1)*(s+1)+i];
+                          auto tri=[&](int x,int y,int z){
+                              FTri t; t.v[0]=x; t.v[1]=y; t.v[2]=z; t.glass=pn.glass;
+                              for (int e=0;e<3;e++)
+                                  t.e[e]=len(verts[t.v[(e+1)%3]].rest-verts[t.v[e]].rest);
+                              tris.push_back(t);
+                          };
+                          tri(a,b,c); tri(a,c,d);
+                      }
+                  }
+                  rebuildIndex();
+                  int vc=(int)verts.size();
+                  vbuf.assign(vc*3,0.f); nbuf.assign(vc*3,0.f); cbuf.assign(vc*4,255);
+                  mesh.vertexCount=vc;
+                  mesh.triangleCount=(int)tris.size();
+                  mesh.vertices=vbuf.data();
+                  mesh.normals=nbuf.data();
+                  mesh.colors=cbuf.data();
+                  mesh.indices=idx.data();
+                  UploadMesh(&mesh,true);
+                  mat=LoadMaterialDefault();
+                  mat.maps[MATERIAL_MAP_DIFFUSE].color=WHITE;
+                  uploaded=true;
+              }
+              void update(std::vector<Node>& nodes,std::vector<V3>& detached){
+                  detached.clear();
+                  V3 X,Y,Z;
+                  for (auto& v : verts){
+                      frame(nodes[v.n[0]].p,nodes[v.n[1]].p,nodes[v.n[2]].p,X,Y,Z);
+                      v.pos=nodes[v.n[0]].p+X*v.local.x+Y*v.local.y+Z*v.local.z;
+                      v.nrm=V3{};
+                  }
+                  bool dirty=false;
+                  for (auto& t : tris){
+                      if (t.dead) continue;
+                      V3 a=verts[t.v[0]].pos,b=verts[t.v[1]].pos,c=verts[t.v[2]].pos;
+                      V3 nn=cross(b-a,c-a);
+                      float worst=0;
+                      for (int e=0;e<3;e++){
+                          float L=len(verts[t.v[(e+1)%3]].pos-verts[t.v[e]].pos);
+                          worst=std::max(worst,std::fabs(L-t.e[e])/std::max(t.e[e],0.01f));
+                      }
+                      float dm=(nodes[verts[t.v[0]].n[0]].damage
+                               +nodes[verts[t.v[1]].n[0]].damage
+                               +nodes[verts[t.v[2]].n[0]].damage)/3.f;
+                      if (worst>(t.glass?0.22f:0.62f) || (dm>0.85f&&worst>0.25f)){
+                          t.dead=true; detached.push_back((a+b+c)*(1.f/3.f)); dirty=true; continue;
+                      }
+                      verts[t.v[0]].nrm+=nn; verts[t.v[1]].nrm+=nn; verts[t.v[2]].nrm+=nn;
+                  }
+                  const V3 L=norm(V3(0.42f,0.86f,0.30f));
+                  for (size_t i=0;i<verts.size();i++){
+                      FVert& v=verts[i];
+                      v.nrm=norm(v.nrm);
+                      float sh=(0.34f+0.66f*std::max(0.f,dot(v.nrm,L)))
+                              *(1.f-0.45f*clampf(nodes[v.n[0]].damage,0.f,1.f));
+                      vbuf[i*3]=v.pos.x; vbuf[i*3+1]=v.pos.y; vbuf[i*3+2]=v.pos.z;
+                      nbuf[i*3]=v.nrm.x; nbuf[i*3+1]=v.nrm.y; nbuf[i*3+2]=v.nrm.z;
+                      cbuf[i*4]=(unsigned char)clampf(v.base.r*sh,0,255);
+                      cbuf[i*4+1]=(unsigned char)clampf(v.base.g*sh,0,255);
+                      cbuf[i*4+2]=(unsigned char)clampf(v.base.b*sh,0,255);
+                      cbuf[i*4+3]=255;
+                  }
+                  if (dirty){
+                      rebuildIndex();
+                      UnloadMesh(mesh);
+                      mesh.vertices=vbuf.data(); mesh.normals=nbuf.data();
+                      mesh.colors=cbuf.data(); mesh.indices=idx.data();
+                      mesh.vertexCount=(int)verts.size(); mesh.triangleCount=(int)tris.size();
+                      UploadMesh(&mesh,true);
+                  } else {
+                      UpdateMeshBuffer(mesh,0,vbuf.data(),(int)vbuf.size()*4,0);
+                      UpdateMeshBuffer(mesh,2,nbuf.data(),(int)nbuf.size()*4,0);
+                      UpdateMeshBuffer(mesh,3,cbuf.data(),(int)cbuf.size(),0);
+                  }
+              }
+              void draw(){
+                  if (!uploaded) return;
+                  rlDisableBackfaceCulling();
+                  DrawMesh(mesh,mat,MatrixIdentity());
+                  rlEnableBackfaceCulling();
+              }
+              void unload(){ if (uploaded){ UnloadMesh(mesh); UnloadMaterial(mat); uploaded=false; } }
+          };
+
+          static std::vector<Panel> carPanels(Color paint){
+              std::vector<Panel> P;
+              Color glass{40,55,75,255},dark{35,35,40,255};
+              const int NS=6;
+              int F[NS][3],B[NS][3],R[4][3];
+              int idx=0;
+              for (int i=0;i<NS;i++) for (int k=0;k<3;k++){ F[i][k]=idx++; B[i][k]=idx++; }
+              for (int i=1;i<=3;i++) for (int k=0;k<3;k++) R[i][k]=idx++;
+              auto q=[&](int a,int b,int c,int d,Color col,bool g=false,int s=2){
+                  P.push_back({a,b,c,d,col,g,s});
+              };
+              for (int i=0;i<NS-1;i++) for (int k=0;k<2;k++)
+                  q(F[i][k],F[i][k+1],F[i+1][k+1],F[i+1][k],dark,false,1);
+              for (int s=0;s<2;s++){ int k=s?2:0;
+                  for (int i=0;i<NS-1;i++) q(F[i][k],B[i][k],B[i+1][k],F[i+1][k],paint,false,2);
+              }
+              for (int i=3;i<NS-1;i++) for (int k=0;k<2;k++)
+                  q(B[i][k],B[i][k+1],B[i+1][k+1],B[i+1][k],paint,false,2);
+              for (int k=0;k<2;k++) q(B[0][k],B[0][k+1],B[1][k+1],B[1][k],paint,false,2);
+              for (int i=1;i<3;i++) for (int k=0;k<2;k++)
+                  q(R[i][k],R[i][k+1],R[i+1][k+1],R[i+1][k],paint,false,2);
+              for (int k=0;k<2;k++) q(R[3][k],R[3][k+1],B[4][k+1],B[4][k],glass,true,2);
+              for (int k=0;k<2;k++) q(B[0][k],B[0][k+1],R[1][k+1],R[1][k],glass,true,2);
+              for (int s=0;s<2;s++){ int k=s?2:0;
+                  for (int i=1;i<3;i++) q(B[i][k],R[i][k],R[i+1][k],B[i+1][k],glass,true,2);
+                  q(B[3][k],R[3][k],B[4][k],B[4][k],paint,false,1);
+                  q(B[0][k],B[1][k],R[1][k],R[1][k],paint,false,1);
+              }
+              for (int k=0;k<2;k++){
+                  q(F[5][k],F[5][k+1],B[5][k+1],B[5][k],dark,false,1);
+                  q(F[0][k+1],F[0][k],B[0][k],B[0][k+1],dark,false,1);
+              }
+              return P;
+          }
+
+          // ============================ FX ============================
+          struct Particle { V3 p,v; float life,maxLife,size; Color c; unsigned char kind; float spin,ang; };
+
+          struct FX {
+              std::vector<Particle> ps;
+              Texture2D soft{};
+              int budget=650;
+              struct Skid { V3 a,b; float life; };
+              std::vector<Skid> skids;
+              void init(){
+                  Image im=GenImageColor(64,64,BLANK);
+                  unsigned char* d=(unsigned char*)im.data;
+                  for (int y=0;y<64;y++) for (int x=0;x<64;x++){
+                      float dx=(x-31.5f)/31.5f,dy=(y-31.5f)/31.5f;
+                      float a=clampf(1.f-std::sqrt(dx*dx+dy*dy),0.f,1.f); a*=a;
+                      int i=(y*64+x)*4;
+                      d[i]=d[i+1]=d[i+2]=255; d[i+3]=(unsigned char)(a*255);
+                  }
+                  soft=LoadTextureFromImage(im);
+                  UnloadImage(im);
+                  ps.reserve(budget);
+              }
+              void spawn(V3 p,V3 v,float life,float size,Color c,unsigned char k){
+                  if ((int)ps.size()>=budget) return;
+                  ps.push_back({p,v,life,life,size,c,k,frand(-6,6),0});
+              }
+              void sparks(V3 p,float power){
+                  int n=(int)clampf(power*2.5f,2,20);
+                  for (int i=0;i<n;i++)
+                      spawn(p,randDir()*frand(2,4+power*0.7f),frand(0.15f,0.5f),
+                            frand(0.03f,0.09f),Color{255,(unsigned char)frand(150,230),80,255},0);
+              }
+              void smoke(V3 p,float amt){
+                  spawn(p+randDir()*0.15f,V3(frand(-.4f,.4f),frand(0.8f,2.0f),frand(-.4f,.4f)),
+                        frand(0.8f,1.8f),frand(0.25f,0.5f)*amt,Color{90,90,95,150},1);
+              }
+              void fire(V3 p){
+                  spawn(p+randDir()*0.2f,V3(0,frand(1.5f,3.5f),0),frand(0.2f,0.5f),
+                        frand(0.2f,0.45f),Color{255,(unsigned char)frand(90,170),30,220},4);
+              }
+              void glass(V3 p){
+                  for (int i=0;i<8;i++)
+                      spawn(p,randDir()*frand(1,5),frand(0.6f,1.4f),frand(0.03f,0.07f),
+                            Color{170,210,235,220},2);
+              }
+              void debris(V3 p,V3 vel,Color c){
+                  for (int i=0;i<4;i++)
+                      spawn(p,vel*0.6f+randDir()*frand(1,4),frand(1.5f,3.0f),
+                            frand(0.07f,0.18f),c,3);
+              }
+              void addSkid(V3 a,V3 b){
+                  if (skids.size()>800) skids.erase(skids.begin(),skids.begin()+100);
+                  skids.push_back({a,b,14.f});
+              }
+              void update(float dt){
+                  for (size_t i=0;i<ps.size();){
+                      Particle& p=ps[i];
+                      p.life-=dt;
+                      if (p.life<=0){ ps[i]=ps.back(); ps.pop_back(); continue; }
+                      float g=(p.kind==1||p.kind==4)?2.0f:-18.f;
+                      p.v.y+=g*dt;
+                      p.v*=1.f/(1.f+((p.kind==1)?1.6f:0.35f)*dt);
+                      p.p+=p.v*dt; p.ang+=p.spin*dt;
+                      if (p.p.y<0.02f && p.kind!=1 && p.kind!=4){
+                          p.p.y=0.02f; p.v.y=-p.v.y*0.32f; p.v.x*=0.7f; p.v.z*=0.7f;
+                      }
+                      if (p.kind==1) p.size+=dt*0.55f;
+                      i++;
+                  }
+                  for (size_t i=0;i<skids.size();){
+                      skids[i].life-=dt;
+                      if (skids[i].life<=0){ skids[i]=skids.back(); skids.pop_back(); }
+                      else i++;
+                  }
+              }
+              void drawSkids(){
+                  rlSetTexture(0);
+                  rlBegin(RL_QUADS);
+                  for (auto& s : skids){
+                      V3 d=norm(s.b-s.a);
+                      V3 sd=norm(cross(V3(0,1,0),d))*0.11f;
+                      unsigned char al=(unsigned char)(clampf(s.life/14.f,0,1)*130);
+                      rlColor4ub(20,20,22,al);
+                      rlVertex3f(s.a.x-sd.x,0.015f,s.a.z-sd.z);
+                      rlVertex3f(s.a.x+sd.x,0.015f,s.a.z+sd.z);
+                      rlVertex3f(s.b.x+sd.x,0.015f,s.b.z+sd.z);
+                      rlVertex3f(s.b.x-sd.x,0.015f,s.b.z-sd.z);
+                  }
+                  rlEnd();
+              }
+              void draw(V3 cr,V3 cu,bool additive){
+                  rlSetTexture(soft.id);
+                  rlBegin(RL_QUADS);
+                  for (auto& p : ps){
+                      bool add=(p.kind==0||p.kind==4);
+                      if (add!=additive) continue;
+                      float t=p.life/p.maxLife;
+                      unsigned char al=(unsigned char)(p.c.a*(p.kind==1?t*0.6f:t));
+                      V3 r=cr*p.size,u=cu*p.size;
+                      rlColor4ub(p.c.r,p.c.g,p.c.b,al);
+                      rlTexCoord2f(0,0); rlVertex3f(p.p.x-r.x-u.x,p.p.y-r.y-u.y,p.p.z-r.z-u.z);
+                      rlTexCoord2f(0,1); rlVertex3f(p.p.x-r.x+u.x,p.p.y-r.y+u.y,p.p.z-r.z+u.z);
+                      rlTexCoord2f(1,1); rlVertex3f(p.p.x+r.x+u.x,p.p.y+r.y+u.y,p.p.z+r.z+u.z);
+                      rlTexCoord2f(1,0); rlVertex3f(p.p.x+r.x-u.x,p.p.y+r.y-u.y,p.p.z+r.z-u.z);
+                  }
+                  rlEnd();
+                  rlSetTexture(0);
+              }
+          };
+
+          struct ChaseCam {
+              Camera3D cam{};
+              V3 smoothPos{},smoothTgt{};
+              float dist=8.5f,height=3.4f,orbit=0.f,pitch=0.18f,shake=0.f,crashTimer=0.f;
+              void init(){ cam.up=Vector3{0,1,0}; cam.fovy=62.f; cam.projection=CAMERA_PERSPECTIVE; }
+              void update(V3 target,V3 fwd,float speed,float dt){
+                  if (crashTimer>0){ crashTimer-=dt; orbit+=dt*0.9f; }
+                  else orbit=smoothTo(orbit,0.f,1.5f,dt);
+                  float c=std::cos(orbit),s=std::sin(orbit);
+                  V3 back=fwd*-1.f;
+                  V3 dir=V3(back.x*c+back.z*s,0,-back.x*s+back.z*c);
+                  V3 want=target+dir*dist+V3(0,height+pitch*6.f,0);
+                  want.y=std::max(want.y,0.8f);
+                  smoothPos=lerp(smoothPos,want,1.f-std::exp(-7.f*dt));
+                  smoothTgt=lerp(smoothTgt,target+fwd*2.0f+V3(0,0.8f,0),1.f-std::exp(-9.f*dt));
+                  shake=std::max(0.f,shake-dt*2.2f);
+                  V3 sh=randDir()*shake*0.22f;
+                  cam.position=rv(smoothPos+sh);
+                  cam.target=rv(smoothTgt+sh*0.4f);
+                  cam.fovy=62.f+clampf(std::fabs(speed)*0.30f,0.f,16.f);
+              }
+          };
+
+          // ============================ ARENA ============================
+          static void makeCrate(Body& B,V3 c,float s,float mass){
+              B=Body{};
+              for (int i=0;i<8;i++){
+                  Node n;
+                  n.p0=n.p=n.pp=c+V3((i&1?s:-s),(i&2?s:-s),(i&4?s:-s));
+                  n.w=8.f/mass; n.r=0.09f; n.fric=0.7f;
+                  B.nodes.push_back(n);
+              }
+              for (int a=0;a<8;a++) for (int b=a+1;b<8;b++)
+                  B.addBeam(a,b,1.6e6f,220.f,STRUCT,0.05f,0.40f,1.f);
+          }
+
+          struct Arena {
+              World world;
+              std::vector<Body> crates;
+              int crusherIdx=-1;
+              float crusherPhase=0.f;
+              void buildBase(){
+                  world.boxes.clear();
+                  auto wall=[&](V3 c,V3 h){
+                      OBB b; b.c=c; b.h=h; b.fric=0.5f; b.col=Color{95,98,110,255};
+                      world.boxes.push_back(b);
+                  };
+                  wall(V3(0,3,-95),V3(95,3,1));
+                  wall(V3(0,3,95),V3(95,3,1));
+                  wall(V3(-95,3,0),V3(1,3,95));
+                  wall(V3(95,3,0),V3(1,3,95));
+              }
+              void mode(int m){
+                  buildBase(); crates.clear(); crusherIdx=-1;
+                  auto box=[&](V3 c,V3 h,Color col,float fr=0.6f){
+                      OBB b; b.c=c; b.h=h; b.fric=fr; b.col=col;
+                      world.boxes.push_back(b);
+                  };
+                  auto ramp=[&](V3 c,V3 h,float ang){
+                      OBB b; b.c=c; b.h=h; b.fric=0.9f; b.col=Color{140,130,110,255};
+                      float cs=std::cos(ang),sn=std::sin(ang);
+                      b.ax[0]=V3(1,0,0); b.ax[1]=V3(0,cs,sn); b.ax[2]=V3(0,-sn,cs);
+                      world.boxes.push_back(b);
+                  };
+                  Color wallC{150,150,155,255},pillarC{170,160,140,255};
+                  if (m==1){
+                      box(V3(0,2.5f,40),V3(14,2.5f,1.2f),wallC);
+                      for (int i=0;i<5;i++)
+                          box(V3(-8.f+i*4.f,0.6f,22),V3(0.5f,0.6f,0.5f),pillarC,0.4f);
+                  } else if (m==2){
+                      ramp(V3(0,1.6f,26),V3(6,0.4f,7),-0.30f);
+                      ramp(V3(-22,2.6f,26),V3(5,0.4f,8),-0.42f);
+                      for (int i=0;i<6;i++)
+                          box(V3(-15.f+i*6.f,1.0f,62),V3(1.6f,1.0f,1.6f),pillarC,0.5f);
+                  } else if (m==3){
+                      for (int i=0;i<8;i++){
+                          float a=i*0.785f;
+                          box(V3(std::cos(a)*30,1.2f,std::sin(a)*30),V3(1.4f,1.2f,1.4f),pillarC,0.5f);
+                      }
+                      for (int i=0;i<8;i++){
+                          Body b; makeCrate(b,V3(frand(-14,14),1.0f+i*0.05f,frand(-14,14)),0.55f,45.f);
+                          crates.push_back(b);
+                      }
+                  } else if (m==4){
+                      OBB b; b.c=V3(0,9,0); b.h=V3(6,1.2f,6);
+                      b.col=Color{190,70,60,255}; b.fric=0.9f;
+                      world.boxes.push_back(b);
+                      crusherIdx=(int)world.boxes.size()-1;
+                      box(V3(0,0.4f,0),V3(8,0.4f,8),Color{80,80,90,255},0.9f);
+                  } else {
+                      ramp(V3(18,1.4f,10),V3(5,0.4f,6),-0.28f);
+                      box(V3(-20,2.0f,-10),V3(6,2.0f,1.0f),wallC);
+                      for (int i=0;i<12;i++){
+                          Body b; makeCrate(b,V3(-6.f+(i%4)*1.3f,0.6f+(i/4)*1.2f,30),0.55f,45.f);
+                          crates.push_back(b);
+                      }
+                      for (int i=0;i<6;i++)
+                          box(V3(30.f,1.5f,-20.f+i*7.f),V3(1.0f,1.5f,1.0f),pillarC,0.4f);
+                  }
+              }
+              void update(float dt){
+                  if (crusherIdx>=0){
+                      crusherPhase+=dt*0.55f;
+                      float t=std::fabs(std::sin(crusherPhase));
+                      OBB& b=world.boxes[crusherIdx];
+                      float ny=1.6f+t*8.0f;
+                      b.vel=V3(0,(ny-b.c.y)/std::max(dt,1e-4f),0);
+                      b.c.y=ny;
+                  }
+              }
+              void draw(){
+                  for (auto& b : world.boxes){
+                      if (!b.enabled) continue;
+                      Matrix m=MatrixIdentity();
+                      m.m0=b.ax[0].x; m.m1=b.ax[0].y; m.m2=b.ax[0].z;
+                      m.m4=b.ax[1].x; m.m5=b.ax[1].y; m.m6=b.ax[1].z;
+                      m.m8=b.ax[2].x; m.m9=b.ax[2].y; m.m10=b.ax[2].z;
+                      m.m12=b.c.x; m.m13=b.c.y; m.m14=b.c.z;
+                      rlPushMatrix();
+                      rlMultMatrixf(MatrixToFloat(m));
+                      DrawCube(Vector3{0,0,0},b.h.x*2,b.h.y*2,b.h.z*2,b.col);
+                      rlPopMatrix();
+                  }
+                  for (auto& c : crates){
+                      V3 ct=c.center();
+                      DrawCube(rv(ct),1.1f,1.1f,1.1f,Color{170,120,60,255});
+                      DrawCubeWires(rv(ct),1.1f,1.1f,1.1f,Color{90,60,30,255});
+                  }
+              }
+          };
+
+          // ============================ TOUCH UI ============================
+          enum WId { W_NONE=-1,W_STEER,W_GAS,W_BRAKE,W_HAND,W_RESET,W_CAM,W_SLOW,W_MODE,W_SPAWN,W_COUNT };
+          struct Input {
+              float steer=0,gas=0,brake=0;
+              bool hand=false,reset=false,cam=false,slow=false,mode=false,spawn=false;
+              float camDX=0,camDY=0,zoom=0;
+          };
+          struct TouchUI {
+              Rectangle r[W_COUNT]{};
+              V3 steerCenter{};
+              float steerRadius=100.f,S=1.f,steerVisual=0.f;
+              int owner[10],ids[10];
+              TouchUI(){ for (int i=0;i<10;i++){ owner[i]=W_NONE; ids[i]=-1; } }
+              void layout(int W,int H){
+                  S=H/720.f; float s=S;
+                  steerCenter=V3(160*s,H-160*s,0);
+                  steerRadius=118*s;
+                  r[W_STEER]=Rectangle{steerCenter.x-steerRadius,steerCenter.y-steerRadius,
+                                       steerRadius*2,steerRadius*2};
+                  r[W_GAS]=Rectangle{W-160*s,H-280*s,130*s,240*s};
+                  r[W_BRAKE]=Rectangle{W-320*s,H-215*s,130*s,175*s};
+                  r[W_HAND]=Rectangle{W-450*s,H-140*s,105*s,100*s};
+                  float bw=92*s,bh=56*s,gap=8*s;
+                  float x=W-(bw+gap)*5-10*s;
+                  for (int i=0;i<5;i++) r[W_RESET+i]=Rectangle{x+i*(bw+gap),12*s,bw,bh};
+              }
+              int hit(V3 p) const {
+                  for (int i=0;i<W_COUNT;i++)
+                      if (CheckCollisionPointRec(Vector2{p.x,p.y},r[i])) return i;
+                  return W_NONE;
+              }
+              int slot(int id){
+                  for (int i=0;i<10;i++) if (ids[i]==id) return i;
+                  for (int i=0;i<10;i++) if (ids[i]==-1){ ids[i]=id; owner[i]=W_NONE; return i; }
+                  return -1;
+              }
+              void update(Input& in,int W,int H){
+                  in.reset=in.cam=in.slow=in.mode=in.spawn=false;
+                  in.gas=in.brake=0; in.hand=false;
+                  in.camDX=in.camDY=in.zoom=0;
+                  float steerTarget=0; bool steerHeld=false;
+                  int n=GetTouchPointCount();
+                  bool used[10]={false};
+                  static Vector2 last[10];
+                  for (int t=0;t<n && t<10;t++){
+                      int id=GetTouchPointId(t);
+                      Vector2 tp=GetTouchPosition(t);
+                      V3 p(tp.x,tp.y,0);
+                      int sl=slot(id); if (sl<0) continue;
+                      used[sl]=true;
+                      if (owner[sl]==W_NONE){
+                          owner[sl]=hit(p);
+                          if (owner[sl]==W_NONE){ owner[sl]=-2; last[sl]=tp; }
+                      }
+                      int w=owner[sl];
+                      if (w==W_STEER){ steerTarget=clampf((p.x-steerCenter.x)/steerRadius,-1,1); steerHeld=true; }
+                      else if (w==W_GAS) in.gas=1;
+                      else if (w==W_BRAKE) in.brake=1;
+                      else if (w==W_HAND) in.hand=true;
+                      else if (w==W_RESET) in.reset=true;
+                      else if (w==W_CAM) in.cam=true;
+                      else if (w==W_SLOW) in.slow=true;
+                      else if (w==W_MODE) in.mode=true;
+                      else if (w==W_SPAWN) in.spawn=true;
+                      else if (w==-2){
+                          in.camDX+=(tp.x-last[sl].x)*0.006f;
+                          in.camDY+=(tp.y-last[sl].y)*0.004f;
+                          last[sl]=tp;
+                      }
+                  }
+                  if (n==0){
+                      static int mo=W_NONE;
+                      static Vector2 lastM{};
+                      Vector2 mp=GetMousePosition();
+                      if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)){
+                          mo=hit(V3(mp.x,mp.y,0)); lastM=mp;
+                      }
+                      if (IsMouseButtonReleased(MOUSE_LEFT_BUTTON)) mo=W_NONE;
+                      if (IsMouseButtonDown(MOUSE_LEFT_BUTTON)){
+                          if (mo==W_STEER){ steerTarget=clampf((mp.x-steerCenter.x)/steerRadius,-1,1); steerHeld=true; }
+                          else if (mo==W_GAS) in.gas=1;
+                          else if (mo==W_BRAKE) in.brake=1;
+                          else if (mo==W_HAND) in.hand=true;
+                          else if (mo==W_RESET) in.reset=true;
+                          else if (mo==W_CAM) in.cam=true;
+                          else if (mo==W_SLOW) in.slow=true;
+                          else if (mo==W_MODE) in.mode=true;
+                          else if (mo==W_SPAWN) in.spawn=true;
+                          else {
+                              in.camDX+=(mp.x-lastM.x)*0.006f;
+                              in.camDY+=(mp.y-lastM.y)*0.004f;
+                          }
+                          lastM=mp;
+                      }
+                      in.zoom=-GetMouseWheelMove()*0.6f;
+                  }
+                  for (int i=0;i<10;i++) if (!used[i] && ids[i]!=-1){ ids[i]=-1; owner[i]=W_NONE; }
+                  if (IsKeyDown(KEY_A)||IsKeyDown(KEY_LEFT)){ steerTarget=-1; steerHeld=true; }
+                  if (IsKeyDown(KEY_D)||IsKeyDown(KEY_RIGHT)){ steerTarget=1; steerHeld=true; }
+                  if (IsKeyDown(KEY_W)||IsKeyDown(KEY_UP)) in.gas=1;
+                  if (IsKeyDown(KEY_S)||IsKeyDown(KEY_DOWN)) in.brake=1;
+                  if (IsKeyDown(KEY_SPACE)) in.hand=true;
+                  if (IsKeyPressed(KEY_R)) in.reset=true;
+                  if (IsKeyPressed(KEY_C)) in.cam=true;
+                  if (IsKeyPressed(KEY_T)) in.slow=true;
+                  if (IsKeyPressed(KEY_M)) in.mode=true;
+                  if (IsKeyPressed(KEY_F)) in.spawn=true;
+                  in.steer=steerHeld?steerTarget:smoothTo(in.steer,0.f,9.f,GetFrameTime());
+                  steerVisual=smoothTo(steerVisual,in.steer,18.f,GetFrameTime());
+              }
+              void draw(int W,int H,const Input& in,bool slowmo,int mode,float dmg){
+                  float s=S;
+                  auto btn=[&](int id,const char* txt,bool active){
+                      Rectangle q=r[id];
+                      DrawRectangleRounded(q,0.3f,6,active?Color{70,150,220,220}:Color{20,22,30,170});
+                      DrawRectangleRoundedLines(q,0.3f,6,2.0f,Color{255,255,255,60});
+                      int tw=MeasureText(txt,(int)(18*s));
+                      DrawText(txt,(int)(q.x+q.width/2-tw/2),(int)(q.y+q.height/2-9*s),(int)(18*s),RAYWHITE);
+                  };
+                  DrawCircle((int)steerCenter.x,(int)steerCenter.y,steerRadius,Color{20,22,30,150});
+                  DrawCircleLines((int)steerCenter.x,(int)steerCenter.y,steerRadius,Color{255,255,255,70});
+                  DrawCircle((int)(steerCenter.x+steerVisual*steerRadius*0.78f),
+                             (int)steerCenter.y,44*s,Color{90,170,240,220});
+                  auto pedal=[&](int id,const char* t,float v,Color c){
+                      Rectangle q=r[id];
+                      DrawRectangleRounded(q,0.22f,6,Color{20,22,30,170});
+                      Rectangle f=q; f.height=q.height*v; f.y=q.y+q.height*(1-v);
+                      if (v>0.01f) DrawRectangleRounded(f,0.22f,6,c);
+                      DrawRectangleRoundedLines(q,0.22f,6,2.0f,Color{255,255,255,60});
+                      int tw=MeasureText(t,(int)(18*s));
+                      DrawText(t,(int)(q.x+q.width/2-tw/2),(int)(q.y+10*s),(int)(18*s),RAYWHITE);
+                  };
+                  pedal(W_GAS,"GAS",in.gas,Color{60,190,90,220});
+                  pedal(W_BRAKE,"BRK",in.brake,Color{220,70,60,220});
+                  btn(W_HAND,"P-BRK",in.hand);
+                  btn(W_RESET,"RESET",false);
+                  btn(W_CAM,"CAM",false);
+                  btn(W_SLOW,"SLOW",slowmo);
+                  btn(W_MODE,"MODE",false);
+                  btn(W_SPAWN,"CAR",false);
+                  const char* names[]={"SANDBOX","CRASH TEST","RAMP JUMP","DERBY","CRUSHER"};
+                  DrawText(names[mode],(int)(14*s),(int)(14*s),(int)(24*s),RAYWHITE);
+                  DrawRectangle((int)(14*s),(int)(46*s),(int)(200*s),(int)(14*s),Color{0,0,0,140});
+                  DrawRectangle((int)(14*s),(int)(46*s),(int)(200*s*clampf(dmg,0,1)),(int)(14*s),Color{230,90,50,230});
+                  DrawText("DAMAGE",(int)(14*s),(int)(64*s),(int)(14*s),Color{255,255,255,170});
+              }
+          };
+
+          // ============================ AUDIO ============================
+          struct GameAudio {
+              Sound engine{},crash{},screech{};
+              bool ok=false; float engVol=0;
+              void init(){
+                  const int SR=22050;
+                  int N=SR/40;
+                  std::vector<short> buf(N);
+                  for (int i=0;i<N;i++){
+                      float t=i/(float)N,v=0;
+                      for (int h=1;h<=8;h++)
+                          v+=std::sin(2*PI*h*t+h*0.7f)/h*(h%2?1.f:0.6f);
+                      v+=0.25f*std::sin(2*PI*0.5f*t);
+                      buf[i]=(short)(clampf(v*0.30f,-1,1)*30000);
+                  }
+                  Wave w{}; w.frameCount=N; w.sampleRate=SR; w.sampleSize=16; w.channels=1; w.data=buf.data();
+                  engine=LoadSoundFromWave(w);
+                  SetSoundVolume(engine,0.f);
+                  int M=SR/3;
+                  std::vector<short> cb(M);
+                  for (int i=0;i<M;i++){
+                      float t=i/(float)SR;
+                      float n=frand(-1,1)*std::exp(-t*16.f);
+                      float low=std::sin(2*PI*70*t)*std::exp(-t*9.f);
+                      cb[i]=(short)(clampf(n*0.7f+low*0.8f,-1,1)*30000);
+                  }
+                  Wave cw{}; cw.frameCount=M; cw.sampleRate=SR; cw.sampleSize=16; cw.channels=1; cw.data=cb.data();
+                  crash=LoadSoundFromWave(cw);
+                  int K=SR/2;
+                  std::vector<short> sb2(K);
+                  float f1=0,f2=0;
+                  for (int i=0;i<K;i++){
+                      float t=i/(float)SR,n=frand(-1,1);
+                      f1+=(n-f1)*0.35f; f2+=(f1-f2)*0.35f;
+                      float tone=std::sin(2*PI*1250*t+std::sin(2*PI*7*t)*3.f);
+                      sb2[i]=(short)(clampf(tone*0.35f+(f1-f2)*1.6f,-1,1)*17000);
+                  }
+                  Wave sw{}; sw.frameCount=K; sw.sampleRate=SR; sw.sampleSize=16; sw.channels=1; sw.data=sb2.data();
+                  screech=LoadSoundFromWave(sw);
+                  SetSoundVolume(screech,0.f);
+                  ok=true;
+              }
+              void updateEngine(float rpm,float thr,float red){
+                  if (!ok) return;
+                  if (!IsSoundPlaying(engine)) PlaySound(engine);
+                  SetSoundPitch(engine,clampf(0.55f+rpm/red*2.3f,0.4f,3.2f));
+                  engVol=smoothTo(engVol,0.10f+thr*0.22f,8.f,GetFrameTime());
+                  SetSoundVolume(engine,engVol);
+              }
+              void updateScreech(float a){
+                  if (!ok) return;
+                  if (!IsSoundPlaying(screech)) PlaySound(screech);
+                  SetSoundVolume(screech,clampf(a,0,1)*0.28f);
+                  SetSoundPitch(screech,0.85f+clampf(a,0,1)*0.5f);
+              }
+              void bang(float p){
+                  if (!ok) return;
+                  SetSoundPitch(crash,frand(0.7f,1.3f));
+                  SetSoundVolume(crash,clampf(p*0.10f,0.10f,0.85f));
+                  PlaySound(crash);
+              }
+              void shutdown(){
+                  if (!ok) return;
+                  UnloadSound(engine); UnloadSound(crash); UnloadSound(screech); ok=false;
+              }
+          };
+
+          // ============================ GAME ============================
+          struct CarEntity {
+              Vehicle veh; FlexMesh mesh; bool ai=false;
+              V3 lastSkid[4]{}; bool skidInit[4]{false,false,false,false};
+          };
+
+          struct Game {
+              Arena arena;
+              std::vector<std::unique_ptr<CarEntity>> cars;
+              std::vector<Body> crateBodies;
+              FX fx; ChaseCam cam; TouchUI ui; GameAudio audio; Input in;
+              Texture2D ground{}; Mesh groundMesh{}; Material groundMat{};
+              int mode=0,camMode=0;
+              bool slowmo=false;
+              float score=0,bestScore=0,airTime=0,messageTimer=0;
+              char message[96]="";
+              void say(const char* t){ snprintf(message,sizeof(message),"%s",t); messageTimer=2.5f; }
+              void init(){ fx.init(); cam.init(); audio.init(); makeGround(); setMode(0); }
+              void makeGround(){
+                  Image im=GenImageColor(256,256,Color{58,58,62,255});
+                  unsigned char* d=(unsigned char*)im.data;
+                  for (int y=0;y<256;y++) for (int x=0;x<256;x++){
+                      int i=(y*256+x)*4;
+                      int n=(rand()%18)-9;
+                      bool line=(x<3||y<3);
+                      d[i]=(unsigned char)clampf((line?78:58)+n,0,255);
+                      d[i+1]=(unsigned char)clampf((line?78:58)+n,0,255);
+                      d[i+2]=(unsigned char)clampf((line?84:62)+n,0,255);
+                      d[i+3]=255;
+                  }
+                  ground=LoadTextureFromImage(im);
+                  UnloadImage(im);
+                  SetTextureWrap(ground,TEXTURE_WRAP_REPEAT);
+                  static float v[12]={-100,0,-100, 100,0,-100, 100,0,100, -100,0,100};
+                  static float uv[8]={0,0, 50,0, 50,50, 0,50};
+                  static float nr[12]={0,1,0, 0,1,0, 0,1,0, 0,1,0};
+                  static unsigned short ix[6]={0,1,2, 0,2,3};
+                  groundMesh.vertexCount=4; groundMesh.triangleCount=2;
+                  groundMesh.vertices=v; groundMesh.texcoords=uv;
+                  groundMesh.normals=nr; groundMesh.indices=ix;
+                  UploadMesh(&groundMesh,false);
+                  groundMat=LoadMaterialDefault();
+                  groundMat.maps[MATERIAL_MAP_DIFFUSE].texture=ground;
+              }
+              CarEntity* spawnCar(V3 pos,float yaw,Color paint,bool ai=false){
+                  auto c=std::make_unique<CarEntity>();
+                  CarSpec s; s.paint=paint;
+                  if (ai){ s.mass=1450.f; s.peakTorque=420.f; s.strength=1.3f; }
+                  c->veh.build(s,pos,yaw);
+                  c->mesh.build(c->veh.body.nodes,carPanels(paint));
+                  c->ai=ai;
+                  cars.push_back(std::move(c));
+                  return cars.back().get();
+              }
+              void setMode(int m){
+                  mode=m; arena.mode(m);
+                  for (auto& c : cars) c->mesh.unload();
+                  cars.clear();
+                  crateBodies=arena.crates;
+                  score=0; airTime=0;
+                  V3 start(0,0.2f,-20);
+                  if (m==1) start=V3(0,0.2f,-40);
+                  if (m==4) start=V3(0,0.9f,0);
+                  spawnCar(start,0.f,Color{210,60,50,255});
+                  if (m==3){
+                      spawnCar(V3(18,0.2f,10),3.14f,Color{50,110,200,255},true);
+                      spawnCar(V3(-18,0.2f,10),3.14f,Color{60,170,90,255},true);
+                  }
+                  cam.smoothPos=start+V3(0,4,-10);
+                  cam.smoothTgt=start;
+                  const char* n[]={"SANDBOX","CRASH TEST","RAMP JUMP","DERBY","CRUSHER"};
+                  say(n[m]);
+              }
+              void input(int W,int H){
+                  ui.layout(W,H);
+                  ui.update(in,W,H);
+                  if (in.reset && !cars.empty()){
+                      V3 p=cars[0]->veh.pos;
+                      Color pc=cars[0]->veh.spec.paint;
+                      cars[0]->veh.reset(V3(p.x,0.3f,p.z),0.f);
+                      cars[0]->mesh.unload();
+                      cars[0]->mesh.build(cars[0]->veh.body.nodes,carPanels(pc));
+                      say("RESET");
+                  }
+                  if (in.cam){ camMode=(camMode+1)%3; say("CAMERA"); }
+                  if (in.slow){ slowmo=!slowmo; say(slowmo?"SLOW MOTION ON":"SLOW MOTION OFF"); }
+                  if (in.mode) setMode((mode+1)%5);
+                  if (in.spawn && cars.size()<5 && !cars.empty())
+                      spawnCar(cars[0]->veh.pos+V3(frand(-6,6),3.f,frand(-6,6)),frand(0,6.28f),
+                               Color{(unsigned char)frand(60,240),(unsigned char)frand(60,240),
+                                     (unsigned char)frand(60,240),255});
+                  cam.orbit-=in.camDX;
+                  cam.pitch=clampf(cam.pitch+in.camDY,-0.2f,0.9f);
+                  cam.dist=clampf(cam.dist+in.zoom,4.f,22.f);
+              }
+              void update(float rawDt){
+                  float dt=rawDt*(slowmo?0.22f:1.f);
+                  arena.update(dt);
+                  for (size_t i=1;i<cars.size();i++){
+                      auto* c=cars[i].get();
+                      if (!c->ai) continue;
+                      V3 d=cars[0]->veh.pos-c->veh.pos;
+                      float want=std::atan2(dot(d,c->veh.right),dot(d,c->veh.fwd));
+                      c->veh.steerIn=clampf(want*1.8f,-1.f,1.f);
+                      c->veh.throttle=1.f; c->veh.brakeIn=0.f;
+                  }
+                  if (!cars.empty()){
+                      cars[0]->veh.steerIn=in.steer;
+                      cars[0]->veh.throttle=in.gas;
+                      cars[0]->veh.brakeIn=in.brake;
+                      cars[0]->veh.handbrake=in.hand;
+                  }
+                  std::vector<Body*> bodies;
+                  for (auto& c : cars) bodies.push_back(&c->veh.body);
+                  for (auto& b : crateBodies) bodies.push_back(&b);
+                  const float H=1.f/600.f;
+                  int steps=(int)clampf(std::round(dt/H),1.f,24.f);
+                  float h=dt/steps;
+                  std::vector<BreakEvent> events;
+                  for (int s=0;s<steps;s++){
+                      for (auto& c : cars) c->veh.control(h,arena.world);
+                      sb::step(bodies,arena.world,h,events);
+                  }
+                  float maxImpact=0;
+                  for (auto& e : events){
+                      if (e.power>0.25f) fx.sparks(e.pos,e.power*6.f);
+                      score+=e.power*12.f;
+                  }
+                  std::vector<V3> detached;
+                  for (auto& c : cars){
+                      for (auto& n : c->veh.body.nodes){
+                          if (n.impact>4.f && !n.isWheel){
+                              maxImpact=std::max(maxImpact,n.impact);
+                              if (frand(0,1)<0.25f) fx.sparks(n.p,n.impact*0.6f);
+                              score+=n.impact*0.6f;
+                          }
+                      }
+                      V3 eng=c->veh.pos+c->veh.fwd*1.5f+c->veh.up*0.4f;
+                      if (c->veh.engineDamage>0.45f && frand(0,1)<c->veh.engineDamage*0.6f)
+                          fx.smoke(eng,1.f+c->veh.engineDamage);
+                      if (c->veh.engineDamage>0.85f && frand(0,1)<0.5f) fx.fire(eng);
+                      for (int i=0;i<4;i++){
+                          Wheel& w=c->veh.wheels[i];
+                          if (!w.attached){ c->skidInit[i]=false; continue; }
+                          float slip=std::fabs(w.slipRatio)*0.8f+std::fabs(w.slipAngle)*1.6f;
+                          if (w.onGround && slip>0.32f && w.load>500.f){
+                              if (c->skidInit[i]) fx.addSkid(c->lastSkid[i],w.contactPoint);
+                              c->lastSkid[i]=w.contactPoint; c->skidInit[i]=true;
+                          } else c->skidInit[i]=false;
+                      }
+                      c->mesh.update(c->veh.body.nodes,detached);
+                      for (auto& p : detached){
+                          fx.debris(p,c->veh.body.velocity(),c->veh.spec.paint);
+                          fx.glass(p); score+=40;
+                      }
+                  }
+                  if (maxImpact>6.f){
+                      audio.bang(maxImpact);
+                      cam.shake=std::min(1.4f,maxImpact*0.07f);
+                      if (maxImpact>14.f && cam.crashTimer<=0){
+                          cam.crashTimer=1.1f;
+                          if (!slowmo){ slowmo=true; say("BIG CRASH!"); }
+                      }
+                  }
+                  if (!cars.empty()){
+                      bool air=true;
+                      for (auto& w : cars[0]->veh.wheels) if (w.onGround) air=false;
+                      if (air) airTime+=dt;
+                      else if (airTime>0.6f){
+                          score+=airTime*250;
+                          say(TextFormat("AIR %.2fs +%d",airTime,(int)(airTime*250)));
+                          airTime=0;
+                      } else airTime=0;
+                  }
+                  fx.update(dt);
+                  if (!cars.empty()){
+                      auto& v=cars[0]->veh;
+                      audio.updateEngine(v.rpm,v.throttle,v.spec.redline);
+                      float scr=0;
+                      for (auto& w : v.wheels)
+                          if (w.onGround && w.attached)
+                              scr=std::max(scr,std::fabs(w.slipRatio)*0.7f+std::fabs(w.slipAngle)*1.4f);
+                      audio.updateScreech(scr-0.3f);
+                      V3 cp=v.pos;
+                      if (camMode==1) cp=v.pos+v.up*0.55f+v.fwd*0.3f;
+                      if (camMode==2){ cam.dist=16; cam.pitch=0.7f; }
+                      cam.update(cp,v.fwd,v.speed,rawDt);
+                  }
+                  bestScore=std::max(bestScore,score);
+                  messageTimer-=rawDt;
+              }
+              void draw(int W,int H){
+                  BeginDrawing();
+                  ClearBackground(Color{110,145,185,255});
+                  BeginMode3D(cam.cam);
+                  DrawMesh(groundMesh,groundMat,MatrixIdentity());
+                  arena.draw();
+                  fx.drawSkids();
+                  for (auto& c : cars){
+                      c->mesh.draw();
+                      for (int i=0;i<4;i++){
+                          Wheel& w=c->veh.wheels[i];
+                          Node& n=c->veh.body.nodes[w.node];
+                          V3 axis=c->veh.right;
+                          if (w.front) axis=norm(c->veh.right*std::cos(w.steer)+c->veh.fwd*std::sin(w.steer));
+                          V3 a=n.p-axis*0.13f,b=n.p+axis*0.13f;
+                          DrawCylinderEx(rv(a),rv(b),c->veh.spec.wheelR,c->veh.spec.wheelR,12,Color{25,25,28,255});
+                          DrawCylinderEx(rv(a-axis*0.01f),rv(b+axis*0.01f),
+                                         c->veh.spec.wheelR*0.55f,c->veh.spec.wheelR*0.55f,10,Color{150,150,158,255});
+                      }
+                      DrawPlane(Vector3{c->veh.pos.x,0.02f,c->veh.pos.z},Vector2{4.6f,5.6f},Color{0,0,0,60});
+                  }
+                  V3 fdir=norm(vv(cam.target)-vv(cam.position));
+                  V3 cr=norm(cross(fdir,V3(0,1,0)));
+                  V3 cu=norm(cross(cr,fdir))*-1.f;
+                  BeginBlendMode(BLEND_ALPHA); fx.draw(cr,cu,false);
+                  BeginBlendMode(BLEND_ADDITIVE); fx.draw(cr,cu,true);
+                  BeginBlendMode(BLEND_ALPHA);
+                  EndMode3D();
+                  ui.draw(W,H,in,slowmo,mode,cars.empty()?0:cars[0]->veh.totalDamage);
+                  float s=ui.S;
+                  if (!cars.empty()){
+                      int kmh=(int)(std::fabs(cars[0]->veh.speed)*3.6f);
+                      const char* t=TextFormat("%d km/h",kmh);
+                      DrawText(t,(int)(W/2-MeasureText(t,(int)(40*s))/2),(int)(H-70*s),(int)(40*s),RAYWHITE);
+                      DrawText(TextFormat("GEAR %s%d  RPM %d",cars[0]->veh.gear==0?"R":"",
+                               cars[0]->veh.gear==0?1:cars[0]->veh.gear,(int)cars[0]->veh.rpm),
+                               (int)(W/2-70*s),(int)(H-26*s),(int)(18*s),Color{255,255,255,180});
+                  }
+                  DrawText(TextFormat("SCORE %d   BEST %d",(int)score,(int)bestScore),
+                           (int)(14*s),(int)(86*s),(int)(20*s),Color{255,225,120,230});
+                  if (messageTimer>0){
+                      int tw=MeasureText(message,(int)(30*s));
+                      DrawText(message,W/2-tw/2,(int)(H*0.22f),(int)(30*s),
+                               Color{255,255,255,(unsigned char)clampf(messageTimer*180,0,255)});
+                  }
+                  DrawText(TextFormat("%d FPS",GetFPS()),W-90,H-22,16,Color{255,255,255,120});
+                  EndDrawing();
+              }
+              void shutdown(){
+                  for (auto& c : cars) c->mesh.unload();
+                  UnloadMesh(groundMesh); UnloadMaterial(groundMat); UnloadTexture(ground);
+                  UnloadTexture(fx.soft);
+                  audio.shutdown();
+              }
+          };
+
+          int main(){
+              SetConfigFlags(FLAG_MSAA_4X_HINT|FLAG_VSYNC_HINT);
+              InitWindow(1280,720,"CrashForge");
+              SetExitKey(KEY_NULL);
+              SetTargetFPS(60);
+              InitAudioDevice();
+              Game g;
+              g.init();
+              while (!WindowShouldClose()){
+                  int W=GetScreenWidth(),H=GetScreenHeight();
+                  float dt=std::min(GetFrameTime(),1.f/30.f);
+                  g.input(W,H);
+                  g.update(dt);
+                  g.draw(W,H);
+              }
+              g.shutdown();
+              CloseAudioDevice();
+              CloseWindow();
+              return 0;
+          }
+          EOF_CPP
+
+          cat > docs/index.html << 'EOF_HTML'
+          <!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1">
+          <title>CrashForge - 3D разрушение машин</title><style>
+          :root{--bg:#0b0e14;--card:#141926;--acc:#ff5a3c;--acc2:#3ba7ff;--txt:#e8ecf4}
+          *{box-sizing:border-box;margin:0;padding:0}
+          body{background:var(--bg);color:var(--txt);font-family:system-ui,-apple-system,Roboto,sans-serif;line-height:1.6}
+          .wrap{max-width:900px;margin:0 auto;padding:24px 18px 80px}
+          header{text-align:center;padding:44px 0 26px}
+          h1{font-size:clamp(38px,9vw,72px);font-weight:900;letter-spacing:-2px;
+          background:linear-gradient(100deg,var(--acc),#ffb03c,var(--acc2));
+          -webkit-background-clip:text;background-clip:text;color:transparent}
+          .sub{color:#9aa5bb;font-size:clamp(15px,4vw,19px);margin-top:8px}
+          .btn{display:block;width:100%;max-width:420px;margin:24px auto 10px;padding:20px;
+          background:linear-gradient(135deg,var(--acc),#ff8a3c);color:#fff;border-radius:16px;
+          font-size:20px;font-weight:800;text-align:center;text-decoration:none;
+          box-shadow:0 10px 34px rgba(255,90,60,.35)}
+          .btn:active{transform:scale(.97)}
+          .btn.alt{background:var(--card);border:1px solid #2a3348;box-shadow:none;font-size:16px;padding:15px}
+          .status{text-align:center;color:#8b96ad;font-size:14px;min-height:22px}
+          .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:32px 0}
+          .card{background:var(--card);border:1px solid #222b3d;border-radius:14px;padding:18px}
+          .card h3{font-size:16px;margin-bottom:6px;color:var(--acc2)}
+          .card p{font-size:14px;color:#9aa5bb}
+          h2{font-size:23px;margin:34px 0 12px;border-left:4px solid var(--acc);padding-left:12px}
+          ol{padding-left:22px;color:#c3cbdb;font-size:15px}ol li{margin:8px 0}
+          code{background:#1d2434;padding:2px 7px;border-radius:6px;font-size:13px;color:#ffb03c}
+          .badge{display:inline-block;background:#1d2434;border:1px solid #2a3348;border-radius:20px;
+          padding:5px 13px;font-size:12px;color:#9aa5bb;margin:4px 3px}
+          footer{text-align:center;color:#5c6579;font-size:13px;margin-top:46px}
+          </style></head><body><div class="wrap">
+          <header><h1>CRASHFORGE</h1>
+          <div class="sub">Soft-body физика разрушения автомобилей - C++ - Android</div>
+          <div style="margin-top:14px"><span class="badge">XPBD node-beam</span>
+          <span class="badge">Pacejka шины</span><span class="badge">Без рекламы</span></div></header>
+          <a id="dl" class="btn" href="#">СКАЧАТЬ APK</a>
+          <div id="st" class="status">Проверяю последний релиз...</div>
+          <a id="nl" class="btn alt" href="#">Свежая сборка из Actions</a>
+          <div class="grid">
+          <div class="card"><h3>Кузов мнётся по-настоящему</h3><p>49 узлов и около 1000 балок. Пластическая деформация, разрыв связей, отрыв колёс и панелей.</p></div>
+          <div class="card"><h3>Честные шины</h3><p>Модель Pacejka: продольное скольжение, угол увода, эллипс трения. Юз, дрифт, следы на асфальте.</p></div>
+          <div class="card"><h3>5 режимов</h3><p>Песочница, краш-тест в стену, трамплин, дерби с ИИ, гидравлический пресс.</p></div>
+          <div class="card"><h3>Слоумо</h3><p>Кинематографичная камера включается автоматически на сильном ударе.</p></div>
+          <div class="card"><h3>Тач-управление</h3><p>Мультитач: джойстик руля, педали, ручник. Всё под большой палец.</p></div>
+          <div class="card"><h3>Ноль ассетов</h3><p>Графика и звук генерируются кодом. APK весит считанные мегабайты.</p></div>
+          </div>
+          <h2>Установка</h2><ol>
+          <li>Нажми СКАЧАТЬ APK выше с телефона.</li>
+          <li>Открой файл <code>CrashForge.apk</code>.</li>
+          <li>Разреши установку из неизвестных источников.</li>
+          <li>Установи и открой. Нужен Android 7+ и arm64.</li></ol>
+          <h2>Управление</h2><ol>
+          <li>Слева - джойстик руля.</li>
+          <li>Справа - GAS и BRK. Держи BRK на месте - задняя передача.</li>
+          <li>P-BRK - ручник для дрифта.</li>
+          <li>MODE - режим, CAR - ещё машина, RESET - починить.</li>
+          <li>SLOW - слоумо, CAM - камера. Свайп по свободной зоне - обзор.</li></ol>
+          <footer>CrashForge - открытый исходник на C++</footer></div>
+          <script>
+          const owner=location.hostname.split('.')[0];
+          const repo=location.pathname.split('/').filter(Boolean)[0]||'CrashForge';
+          const st=document.getElementById('st'),dl=document.getElementById('dl');
+          document.getElementById('nl').href='https://nightly.link/'+owner+'/'+repo+'/workflows/build/main/CrashForge-apk.zip';
+          fetch('https://api.github.com/repos/'+owner+'/'+repo+'/releases/latest')
+          .then(r=>r.ok?r.json():Promise.reject()).then(j=>{
+          const a=(j.assets||[]).find(x=>x.name.endsWith('.apk'));
+          if(!a)throw 0;
+          dl.href=a.browser_download_url;
+          st.textContent=j.tag_name+' - '+(a.size/1048576).toFixed(1)+' МБ';
+          }).catch(()=>{dl.href='https://github.com/'+owner+'/'+repo+'/releases';
+          st.textContent='Релиз ещё готовится - обнови страницу через минуту';});
+          </script></body></html>
+          EOF_HTML
+
+          cat > README.md << 'EOF_RM'
+          # CrashForge
+          3D soft-body vehicle destruction. C++20 + raylib. Android APK built by GitHub Actions.
+          Source: src/main.cpp. Build: see .github/workflows/build.yml
+          EOF_RM
+
+      - name: Commit generated sources
+        run: |
+          git config user.name "crashforge-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "Generate CrashForge sources [skip ci]"
+          git push || true
+
       - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: '17' }
+        with:
+          distribution: temurin
+          java-version: '17'
 
       - uses: android-actions/setup-android@v3
 
-      - name: Install SDK/NDK/CMake
+      - name: Install SDK NDK CMake
         run: |
-          yes | sdkmanager --licenses > /dev/null
-          sdkmanager "platforms;android-34" "build-tools;34.0.0" \
-                     "ndk;26.1.10909125" "cmake;3.22.1"
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125" "cmake;3.22.1"
 
       - uses: gradle/actions/setup-gradle@v3
-        with: { gradle-version: '8.9' }
+        with:
+          gradle-version: '8.9'
 
       - name: Build APK
         working-directory: android
         run: gradle assembleRelease --no-daemon --stacktrace
 
-      - name: Rename
+      - name: Collect APK
         run: |
           mkdir -p out
           cp android/app/build/outputs/apk/release/*.apk out/CrashForge.apk
+          ls -la out
 
       - uses: actions/upload-artifact@v4
         with:
           name: CrashForge-apk
           path: out/CrashForge.apk
 
-      - name: Release
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: CrashForge build ${{ github.run_number }}
           files: out/CrashForge.apk
-          name: CrashForge ${{ github.ref_name }}
           body: |
-            APK для Android 7+ (arm64).
-            Скачай CrashForge.apk, разреши установку из неизвестных источников, открой файл.
+            Android 7+ arm64. Скачай CrashForge.apk и открой файл на телефоне.
+
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+      - id: dep
+        uses: actions/deploy-pages@v4
